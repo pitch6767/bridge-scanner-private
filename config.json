@@ -1,0 +1,21 @@
+{
+  "port": 8085,
+  "poll_interval_sec": 15,
+  "dislocation_threshold_pct": 1.0,
+  "survival_check_sec": 60,
+  "assumed_fees_pct": {
+    "kraken_taker": 0.26,
+    "hl_taker": 0.045,
+    "slippage_buffer": 0.10
+  },
+  "tickers": [
+    { "symbol": "TSLA", "kraken_pair": "TSLAxUSD", "hl_coin": "TSLA" },
+    { "symbol": "NVDA", "kraken_pair": "NVDAxUSD", "hl_coin": "NVDA" },
+    { "symbol": "AAPL", "kraken_pair": "AAPLxUSD", "hl_coin": "AAPL" },
+    { "symbol": "MSTR", "kraken_pair": "MSTRxUSD", "hl_coin": "MSTR" },
+    { "symbol": "COIN", "kraken_pair": "COINxUSD", "hl_coin": "COIN" },
+    { "symbol": "SPY",  "kraken_pair": "SPYxUSD",  "hl_coin": "SPY" },
+    { "symbol": "QQQ",  "kraken_pair": "QQQxUSD",  "hl_coin": "QQQ" }
+  ],
+  "note": "kraken_pair et hl_coin a verifier contre les APIs reelles au premier deploy - le scanner marque UNKNOWN les feeds qui repondent en erreur"
+}

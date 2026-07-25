@@ -1,0 +1,7 @@
+{
+  "name": "bridge-scanner",
+  "version": "1.0.0",
+  "description": "Livre 4 - triangle U/S/F + carry xStocks",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" }
+}
