@@ -13,7 +13,7 @@
   "tickers": [
     { "symbol": "TSLA", "bybit_symbol": "TSLAXUSDT", "hl_coin": "xyz:TSLA" },
     { "symbol": "NVDA", "bybit_symbol": "NVDAXUSDT", "hl_coin": "xyz:NVDA" },
-    { "symbol": "AAPL", "bybit_symbol": "APPLXUSDT", "hl_coin": "xyz:AAPL" },
+    { "symbol": "AAPL", "bybit_symbol": "AAPLXUSDT", "hl_coin": "xyz:AAPL" },
     { "symbol": "MSTR", "bybit_symbol": "MSTRXUSDT", "hl_coin": "xyz:MSTR" },
     { "symbol": "COIN", "bybit_symbol": "COINXUSDT", "hl_coin": "xyz:COIN" }
   ],
