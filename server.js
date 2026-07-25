@@ -197,7 +197,8 @@ h1{font-size:20px;margin:0 0 4px}
 .cbox .l{font-size:11px;color:#8b949e}
 .err{color:#f85149;font-size:12px;margin-top:14px}
 </style></head><body>
-<h1>bridge-scanner <span id="mkt" class="badge closed">…</span></h1>
+<h1>bridge-scanner <span id="mkt" class="badge closed">…</span>
+<button id="upd" style="float:right;background:#21262d;color:#58a6ff;border:1px solid #30363d;border-radius:8px;padding:6px 14px;font-size:12px;cursor:pointer">Mettre à jour</button></h1>
 <div class="sub">Livre 4 · Triangle U/S/F · Phase 1 paper · S = xStocks Bybit · F = perp Hyperliquid · seuil ${CONFIG.dislocation_threshold_pct}% net</div>
 <div class="counters">
   <div class="cbox"><div class="v" id="c_det">0</div><div class="l">dislocations</div></div>
@@ -233,16 +234,63 @@ async function refresh(){
 }
 function fmt(x, suf){ if (x === null || x === undefined) return '–'; return (typeof x === 'number' ? x.toFixed(suf ? 3 : 2) : x) + (suf || ''); }
 refresh(); setInterval(refresh, 10000);
+document.getElementById('upd').onclick = async function(){
+  const k = prompt('Clé de mise à jour :');
+  if (!k) return;
+  this.textContent = '…';
+  try{
+    const r = await fetch('/api/update?key=' + encodeURIComponent(k));
+    const j = await r.json();
+    if (j.ok && j.restart){
+      this.textContent = 'Redémarrage…';
+      setTimeout(function(){ location.reload(); }, 6000);
+    } else {
+      this.textContent = 'Mettre à jour';
+      alert(j.msg || 'erreur');
+    }
+  }catch(e){
+    this.textContent = 'Redémarrage…';
+    setTimeout(function(){ location.reload(); }, 6000);
+  }
+};
 </script>
 </body></html>`;
 }
 
 // ---------- HTTP ----------
+const { execFile } = require("child_process");
+
+function handleUpdate(req, res, urlObj) {
+  const key = urlObj.searchParams.get("key") || "";
+  if (!CONFIG.update_key || key !== CONFIG.update_key) {
+    res.writeHead(403, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: false, msg: "clé invalide" }));
+    return;
+  }
+  execFile("git", ["-C", __dirname, "pull", "--ff-only"], { timeout: 30000 }, (err, stdout, stderr) => {
+    const out = (stdout || "") + (stderr || "");
+    if (err) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, msg: out || err.message }));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, msg: out.trim(), restart: !/Already up to date/i.test(out) }));
+    if (!/Already up to date/i.test(out)) {
+      saveStateAtomic();
+      setTimeout(() => process.exit(0), 800); // systemd relance le service avec le nouveau code
+    }
+  });
+}
+
 const server = http.createServer((req, res) => {
-  if (req.url === "/api/state") {
+  const urlObj = new URL(req.url, "http://localhost");
+  if (urlObj.pathname === "/api/state") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(state));
-  } else if (req.url === "/" || req.url === "/dashboard") {
+  } else if (urlObj.pathname === "/api/update") {
+    handleUpdate(req, res, urlObj);
+  } else if (urlObj.pathname === "/" || urlObj.pathname === "/dashboard") {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
     res.end(dashboardHTML());
   } else {
