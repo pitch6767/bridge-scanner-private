@@ -3,6 +3,13 @@
   "update_key": "9d6966008af510fe3f546bc8c51b6327",
   "poll_interval_sec": 15,
   "dislocation_threshold_pct": 1.0,
+  "paper": {
+    "entry_net_pct": 1.0,
+    "exit_gross_pct": 0.20,
+    "size_usd_per_leg": 1000,
+    "max_open_positions": 3,
+    "max_hold_hours": 72
+  },
   "survival_check_sec": 60,
   "hl_dex": "xyz",
   "assumed_fees_pct": {

@@ -16,7 +16,9 @@ let state = {
   market_open: false,
   tickers: {},          // symbol -> { s_price, f_price, f_funding, spread_pct, spread_net_pct, s_status, f_status, updated }
   dislocations: [],     // { symbol, t_start, spread_net_pct, survived_60s, resolved, t_end }
-  counters: { detected: 0, survived_60s: 0, weekends_logged: 0 },
+  positions: [],        // paper : { id, symbol, side, t_open, s_open, f_open, spread_open_pct, size_usd }
+  history: [],          // paper : positions cloturees + { t_close, s_close, f_close, spread_close_pct, pnl_usd, reason }
+  counters: { detected: 0, survived_60s: 0, weekends_logged: 0, trades: 0, wins: 0, pnl_total_usd: 0 },
   weekend_log: [],      // { weekend_of, symbol, spread_fri_22h, spread_mon_open, converged }
   errors: []
 };
@@ -25,7 +27,9 @@ try {
   if (fs.existsSync(STATE_FILE)) {
     const prev = JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
     state.dislocations = prev.dislocations || [];
-    state.counters = prev.counters || state.counters;
+    state.positions = prev.positions || [];
+    state.history = prev.history || [];
+    state.counters = Object.assign(state.counters, prev.counters || {});
     state.weekend_log = prev.weekend_log || [];
   }
 } catch (e) { /* état neuf */ }
@@ -133,6 +137,7 @@ async function poll() {
       rec.spread_pct = round4(spread);
       rec.spread_net_pct = round4(Math.abs(spread) - totalFeesPct) * Math.sign(spread);
       trackDislocation(t.symbol, rec.spread_net_pct, now);
+      paperEngine(t.symbol, rec, now);
     } else {
       rec.spread_pct = null; rec.spread_net_pct = null;
     }
@@ -141,6 +146,58 @@ async function poll() {
   }
   state.last_poll = now.toISOString();
   saveStateAtomic();
+}
+
+// ---------- Moteur paper ----------
+// Entrée : |spread net| >= entry_net_pct → short la jambe riche / long la jambe pauvre
+// Sortie : |spread brut| <= exit_gross_pct (convergence) OU time stop
+const P = CONFIG.paper;
+const roundTripFeesPct = 2 * (CONFIG.assumed_fees_pct.spot_taker + CONFIG.assumed_fees_pct.hl_taker) + CONFIG.assumed_fees_pct.slippage_buffer;
+
+function paperEngine(symbol, rec, now) {
+  if (rec.spread_pct === null) return;
+  const open = state.positions.find(p => p.symbol === symbol);
+
+  if (!open) {
+    if (Math.abs(rec.spread_net_pct) >= P.entry_net_pct && state.positions.length < P.max_open_positions) {
+      state.positions.push({
+        id: Date.now().toString(36) + "-" + symbol,
+        symbol,
+        side: rec.spread_pct > 0 ? "SHORT_F_LONG_S" : "LONG_F_SHORT_S",
+        t_open: now.toISOString(),
+        s_open: rec.s_price, f_open: rec.f_price,
+        spread_open_pct: rec.spread_pct,
+        size_usd: P.size_usd_per_leg
+      });
+    }
+    return;
+  }
+
+  const ageH = (now - new Date(open.t_open)) / 3600000;
+  const converged = Math.abs(rec.spread_pct) <= P.exit_gross_pct;
+  const sameSign = Math.sign(rec.spread_pct) === Math.sign(open.spread_open_pct);
+  const timeStop = ageH >= P.max_hold_hours;
+
+  if (converged || timeStop || !sameSign) {
+    // P&L : capture de spread (dans le sens de la position) - frais aller-retour
+    const captured = sameSign
+      ? Math.abs(open.spread_open_pct) - Math.abs(rec.spread_pct)
+      : Math.abs(open.spread_open_pct) + Math.abs(rec.spread_pct); // le spread a traversé zéro : gain bonus
+    const pnl = (captured - roundTripFeesPct) / 100 * open.size_usd;
+    const closed = Object.assign({}, open, {
+      t_close: now.toISOString(),
+      s_close: rec.s_price, f_close: rec.f_price,
+      spread_close_pct: rec.spread_pct,
+      pnl_usd: Math.round(pnl * 100) / 100,
+      reason: converged ? "CONVERGENCE" : (timeStop ? "TIME_STOP" : "CROSS_ZERO")
+    });
+    state.history.unshift(closed);
+    state.history = state.history.slice(0, 200);
+    state.positions = state.positions.filter(p => p.id !== open.id);
+    state.counters.trades++;
+    if (pnl > 0) state.counters.wins++;
+    state.counters.pnl_total_usd = Math.round((state.counters.pnl_total_usd + pnl) * 100) / 100;
+  }
 }
 
 function trackDislocation(symbol, netPct, now) {
@@ -204,8 +261,15 @@ h1{font-size:20px;margin:0 0 4px}
   <div class="cbox"><div class="v" id="c_det">0</div><div class="l">dislocations</div></div>
   <div class="cbox"><div class="v" id="c_sur">0</div><div class="l">survie 60s</div></div>
   <div class="cbox"><div class="v" id="c_rate">–</div><div class="l">taux survie</div></div>
+  <div class="cbox"><div class="v" id="c_trades">0</div><div class="l">trades paper</div></div>
+  <div class="cbox"><div class="v" id="c_win">–</div><div class="l">winrate</div></div>
+  <div class="cbox"><div class="v" id="c_pnl">$0</div><div class="l">P&L paper</div></div>
 </div>
 <div class="grid" id="grid"></div>
+<h2 style="font-size:15px;margin:20px 0 8px">Positions ouvertes <small class="lbl">(paper · entrée ≥ ${CONFIG.paper.entry_net_pct}% net · sortie ≤ ${CONFIG.paper.exit_gross_pct}% brut · $${CONFIG.paper.size_usd_per_leg}/jambe)</small></h2>
+<div id="pos" class="grid"></div>
+<h2 style="font-size:15px;margin:20px 0 8px">Historique</h2>
+<table style="width:100%;border-collapse:collapse;font-size:12px" id="hist"></table>
 <div class="err" id="errs"></div>
 <script>
 async function refresh(){
@@ -229,6 +293,39 @@ async function refresh(){
         + '<div class="row"><span class="lbl">Net après frais</span><span class="' + cls + '">' + fmt(net, '%') + '</span></div>';
       g.appendChild(div);
     }
+    document.getElementById('c_trades').textContent = s.counters.trades;
+    document.getElementById('c_win').textContent = s.counters.trades > 0 ? Math.round(100*s.counters.wins/s.counters.trades)+'%' : '–';
+    var pnlEl = document.getElementById('c_pnl');
+    pnlEl.textContent = '$' + s.counters.pnl_total_usd.toFixed(2);
+    pnlEl.className = 'v ' + (s.counters.pnl_total_usd >= 0 ? 'pos' : 'neg');
+    // positions ouvertes
+    const pg = document.getElementById('pos'); pg.innerHTML = '';
+    if (!s.positions.length) pg.innerHTML = '<div class="lbl" style="font-size:13px">aucune</div>';
+    for (const p of s.positions){
+      const t = s.tickers[p.symbol] || {};
+      const cur = t.spread_pct;
+      const sameSign = cur !== null && Math.sign(cur) === Math.sign(p.spread_open_pct);
+      const capt = cur === null ? null : (sameSign ? Math.abs(p.spread_open_pct) - Math.abs(cur) : Math.abs(p.spread_open_pct) + Math.abs(cur));
+      const upnl = capt === null ? null : ((capt - 0.39) / 100 * p.size_usd);
+      const d = document.createElement('div'); d.className = 'card';
+      d.innerHTML = '<div class="sym">' + p.symbol + ' <small class="lbl">' + (p.side === 'SHORT_F_LONG_S' ? 'short perp / long spot' : 'long perp / short spot') + '</small></div>'
+        + '<div class="row"><span class="lbl">Ouvert</span><span>' + p.t_open.slice(5,16).replace('T',' ') + '</span></div>'
+        + '<div class="row"><span class="lbl">Spread entrée</span><span>' + p.spread_open_pct.toFixed(3) + '%</span></div>'
+        + '<div class="row"><span class="lbl">Spread actuel</span><span>' + (cur === null ? '–' : cur.toFixed(3) + '%') + '</span></div>'
+        + '<div class="row"><span class="lbl">P&L latent</span><span class="' + (upnl === null ? 'lbl' : (upnl >= 0 ? 'pos' : 'neg')) + '">' + (upnl === null ? '–' : '$' + upnl.toFixed(2)) + '</span></div>';
+      pg.appendChild(d);
+    }
+    // historique
+    const h = document.getElementById('hist');
+    let rows = '<tr style="color:#8b949e;text-align:left"><th>Clôturé</th><th>Ticker</th><th>Sens</th><th>Entrée</th><th>Sortie</th><th>Raison</th><th style="text-align:right">P&L</th></tr>';
+    for (const x of s.history.slice(0, 30)){
+      rows += '<tr style="border-top:1px solid #21262d"><td>' + x.t_close.slice(5,16).replace('T',' ') + '</td><td><b>' + x.symbol + '</b></td>'
+        + '<td>' + (x.side === 'SHORT_F_LONG_S' ? 'F→S' : 'S→F') + '</td>'
+        + '<td>' + x.spread_open_pct.toFixed(2) + '%</td><td>' + x.spread_close_pct.toFixed(2) + '%</td>'
+        + '<td>' + x.reason + '</td>'
+        + '<td style="text-align:right" class="' + (x.pnl_usd >= 0 ? 'pos' : 'neg') + '">$' + x.pnl_usd.toFixed(2) + '</td></tr>';
+    }
+    h.innerHTML = rows;
     document.getElementById('errs').textContent = (s.errors[0] ? 'Dernière erreur: ' + s.errors[0].t + ' ' + s.errors[0].msg : '');
   }catch(e){ document.getElementById('errs').textContent = 'refresh: ' + e.message; }
 }
