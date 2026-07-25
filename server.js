@@ -54,10 +54,76 @@ function usMarketOpen(now = new Date()) {
 }
 
 // ---------- Feeds ----------
+function normCoin(name) {
+  // "xyz:TSLA" et "TSLA" doivent matcher, quel que soit le format renvoyé par l'API
+  return String(name).toUpperCase().split(":").pop();
+}
+
+// ---------- Auto-découverte de l'univers ----------
+// Intersection : xStocks listés sur Bybit spot × perps equity du dex xyz sur HL.
+// La liste manuelle de config.json sert de base ; la découverte ajoute le reste.
+let UNIVERSE = CONFIG.tickers.slice();
+
+function bybitToTicker(sym) {
+  // "TSLAXUSDT" -> "TSLA"
+  if (!sym.endsWith("XUSDT")) return null;
+  return sym.slice(0, -5);
+}
+
+async function discoverUniverse() {
+  if (!CONFIG.auto_discover) return;
+  try {
+    const [bybitList, hlList] = await Promise.all([
+      (async () => {
+        const r = await fetch("https://api.bybit.com/v5/market/instruments-info?category=spot&symbolType=xstocks&limit=200", { signal: AbortSignal.timeout(10000) });
+        const j = await r.json();
+        const list = (j && j.result && j.result.list) || [];
+        const out = {};
+        for (const it of list) {
+          if (it.status && it.status !== "Trading") continue;
+          const tk = bybitToTicker(it.symbol);
+          if (tk) out[tk] = it.symbol;
+        }
+        return out;
+      })(),
+      (async () => {
+        const r = await fetch("https://api.hyperliquid.xyz/info", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ type: "metaAndAssetCtxs", dex: CONFIG.hl_dex }),
+          signal: AbortSignal.timeout(10000)
+        });
+        const j = await r.json();
+        const universe = (j[0] && j[0].universe) || [];
+        const out = {};
+        for (const u of universe) {
+          if (u.isDelisted) continue;
+          out[normCoin(u.name)] = u.name;
+        }
+        return out;
+      })()
+    ]);
+    const known = new Set(UNIVERSE.map(t => t.symbol));
+    let added = 0;
+    for (const tk of Object.keys(bybitList).sort()) {
+      if (known.has(tk)) continue;
+      if (hlList[tk] !== undefined) {
+        UNIVERSE.push({ symbol: tk, bybit_symbol: bybitList[tk], hl_coin: hlList[tk] });
+        added++;
+        if (UNIVERSE.length >= CONFIG.max_universe) break;
+      }
+    }
+    state.universe_size = UNIVERSE.length;
+    state.universe_discovered = added;
+    console.log("univers: " + UNIVERSE.length + " tickers (" + added + " decouverts)");
+  } catch (e) {
+    pushErr("discover: " + e.message);
+  }
+}
+
 async function fetchBybit() {
   // Jambe S : xStocks sur Bybit spot, API publique v5, un appel par symbole (léger, parallèle)
   const out = {};
-  await Promise.all(CONFIG.tickers.map(async (t) => {
+  await Promise.all(UNIVERSE.map(async (t) => {
     try {
       const url = "https://api.bybit.com/v5/market/tickers?category=spot&symbol=" + t.bybit_symbol;
       const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
@@ -78,11 +144,6 @@ async function fetchBybit() {
   return out;
 }
 
-function normCoin(name) {
-  // "xyz:TSLA" et "TSLA" doivent matcher, quel que soit le format renvoyé par l'API
-  return String(name).toUpperCase().split(":").pop();
-}
-
 async function fetchHyperliquid() {
   const body = JSON.stringify({ type: "metaAndAssetCtxs", dex: CONFIG.hl_dex });
   const r = await fetch("https://api.hyperliquid.xyz/info", {
@@ -95,7 +156,7 @@ async function fetchHyperliquid() {
   const out = {};
   const universe = (j[0] && j[0].universe) || [];
   const ctxs = j[1] || [];
-  for (const t of CONFIG.tickers) {
+  for (const t of UNIVERSE) {
     const want = normCoin(t.hl_coin);
     const idx = universe.findIndex(u => normCoin(u.name) === want);
     if (idx >= 0 && ctxs[idx]) {
@@ -124,7 +185,7 @@ async function poll() {
   try { kr = await fetchBybit(); } catch (e) { pushErr("bybit: " + e.message); }
   try { hl = await fetchHyperliquid(); } catch (e) { pushErr("hyperliquid: " + e.message); }
 
-  for (const t of CONFIG.tickers) {
+  for (const t of UNIVERSE) {
     const s = kr[t.symbol] || { status: "NO_DATA" };
     const f = hl[t.symbol] || { status: "NO_DATA" };
     const rec = state.tickers[t.symbol] || {};
@@ -396,7 +457,8 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(CONFIG.port, "0.0.0.0", () => {
-  console.log("bridge-scanner v1 · port " + CONFIG.port);
-  poll();
+  console.log("bridge-scanner · port " + CONFIG.port);
+  discoverUniverse().then(() => poll());
+  setInterval(discoverUniverse, 6 * 3600 * 1000); // re-scan de l'univers toutes les 6h
   setInterval(poll, CONFIG.poll_interval_sec * 1000);
 });

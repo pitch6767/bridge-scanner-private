@@ -17,6 +17,8 @@
     "hl_taker": 0.045,
     "slippage_buffer": 0.10
   },
+  "auto_discover": true,
+  "max_universe": 40,
   "tickers": [
     { "symbol": "TSLA", "bybit_symbol": "TSLAXUSDT", "hl_coin": "xyz:TSLA" },
     { "symbol": "NVDA", "bybit_symbol": "NVDAXUSDT", "hl_coin": "xyz:NVDA" },
