@@ -13,7 +13,7 @@ C'est là que la basis S-F est la plus large (le perp mène, le token traîne).
 ## Deux moteurs
 1. **Scanner triangle (paper d'abord)** : détecter les dislocations S-F nettes de frais,
    mesurer leur survie (anti-mirage), logger la convergence à chaque réouverture.
-2. **Carry delta-neutre xStocks** : long spot xStock (Kraken, xPoints) + short perp HL.
+2. **Carry delta-neutre xStocks** : long spot xStock (venue spot à choisir : Bybit dispo API, Kraken pour xPoints) + short perp HL.
    Revenus = funding perp + lending yield + xPoints. Clone de la doctrine farm-scanner
    appliqué aux equities.
 
@@ -37,11 +37,11 @@ C'est là que la basis S-F est la plus large (le perp mène, le token traîne).
 - Persistance : state.json en écriture atomique (tmp + rename)
 
 ## Roadmap
-- v1 : scanner S-F paper (Kraken public + HL public), dashboard, télémétrie dislocations
+- v1.1 : scanner S-F paper (Bybit spot xStocks + HL dex xyz), dashboard, télémétrie dislocations
 - v2 : jambe U via IBKR pendant heures de marché, triangle complet
 - v3 : compteurs carry (funding + points), positions paper
 - v4 : exécuteur (si GO)
 
 ## À VÉRIFIER (config.json)
-- Noms exacts des paires xStocks sur Kraken (ex: TSLAx/USD → format API)
-- Noms exacts des perps equity HIP-3 sur Hyperliquid (dex builder, mapping coin)
+- Jambe S : Bybit spot (TSLAXUSDT, NVDAXUSDT, APPLXUSDT, MSTRXUSDT, COINXUSDT) — Kraken API publique = zéro xStock
+- Jambe F : HL dex builder "xyz", coins xyz:TSLA etc. SPY/QQQ absents du dex

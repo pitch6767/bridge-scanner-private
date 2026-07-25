@@ -3,19 +3,18 @@
   "poll_interval_sec": 15,
   "dislocation_threshold_pct": 1.0,
   "survival_check_sec": 60,
+  "hl_dex": "xyz",
   "assumed_fees_pct": {
-    "kraken_taker": 0.26,
+    "spot_taker": 0.10,
     "hl_taker": 0.045,
     "slippage_buffer": 0.10
   },
   "tickers": [
-    { "symbol": "TSLA", "kraken_pair": "TSLAxUSD", "hl_coin": "TSLA" },
-    { "symbol": "NVDA", "kraken_pair": "NVDAxUSD", "hl_coin": "NVDA" },
-    { "symbol": "AAPL", "kraken_pair": "AAPLxUSD", "hl_coin": "AAPL" },
-    { "symbol": "MSTR", "kraken_pair": "MSTRxUSD", "hl_coin": "MSTR" },
-    { "symbol": "COIN", "kraken_pair": "COINxUSD", "hl_coin": "COIN" },
-    { "symbol": "SPY",  "kraken_pair": "SPYxUSD",  "hl_coin": "SPY" },
-    { "symbol": "QQQ",  "kraken_pair": "QQQxUSD",  "hl_coin": "QQQ" }
+    { "symbol": "TSLA", "bybit_symbol": "TSLAXUSDT", "hl_coin": "xyz:TSLA" },
+    { "symbol": "NVDA", "bybit_symbol": "NVDAXUSDT", "hl_coin": "xyz:NVDA" },
+    { "symbol": "AAPL", "bybit_symbol": "APPLXUSDT", "hl_coin": "xyz:AAPL" },
+    { "symbol": "MSTR", "bybit_symbol": "MSTRXUSDT", "hl_coin": "xyz:MSTR" },
+    { "symbol": "COIN", "bybit_symbol": "COINXUSDT", "hl_coin": "xyz:COIN" }
   ],
-  "note": "kraken_pair et hl_coin a verifier contre les APIs reelles au premier deploy - le scanner marque UNKNOWN les feeds qui repondent en erreur"
+  "note": "Jambe S = Bybit spot xStocks (API publique v5). AAPL = APPLX sur Bybit. Jambe F = perps equity HIP-3 sur le dex builder xyz d'Hyperliquid. SPY/QQQ retires (absents du dex xyz)."
 }

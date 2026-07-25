@@ -50,30 +50,37 @@ function usMarketOpen(now = new Date()) {
 }
 
 // ---------- Feeds ----------
-async function fetchKraken() {
-  const pairs = CONFIG.tickers.map(t => t.kraken_pair).join(",");
-  const url = "https://api.kraken.com/0/public/Ticker?pair=" + encodeURIComponent(pairs);
-  const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
-  const j = await r.json();
+async function fetchBybit() {
+  // Jambe S : xStocks sur Bybit spot, API publique v5, un appel par symbole (léger, parallèle)
   const out = {};
-  if (j.result) {
-    for (const t of CONFIG.tickers) {
-      // Kraken renvoie parfois des clés normalisées — on cherche par inclusion
-      const key = Object.keys(j.result).find(k => k.toUpperCase().includes(t.kraken_pair.toUpperCase().replace("/", "")));
-      if (key) {
-        const d = j.result[key];
-        const bid = parseFloat(d.b[0]), ask = parseFloat(d.a[0]);
+  await Promise.all(CONFIG.tickers.map(async (t) => {
+    try {
+      const url = "https://api.bybit.com/v5/market/tickers?category=spot&symbol=" + t.bybit_symbol;
+      const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
+      const j = await r.json();
+      const d = j && j.result && j.result.list && j.result.list[0];
+      if (d && d.bid1Price && d.ask1Price) {
+        const bid = parseFloat(d.bid1Price), ask = parseFloat(d.ask1Price);
         out[t.symbol] = { mid: (bid + ask) / 2, bid, ask, status: "OK" };
+      } else if (d && d.lastPrice) {
+        out[t.symbol] = { mid: parseFloat(d.lastPrice), status: "OK_LAST" };
       } else {
         out[t.symbol] = { status: "UNKNOWN_PAIR" };
       }
+    } catch (e) {
+      out[t.symbol] = { status: "ERR" };
     }
-  }
+  }));
   return out;
 }
 
+function normCoin(name) {
+  // "xyz:TSLA" et "TSLA" doivent matcher, quel que soit le format renvoyé par l'API
+  return String(name).toUpperCase().split(":").pop();
+}
+
 async function fetchHyperliquid() {
-  const body = JSON.stringify({ type: "metaAndAssetCtxs" });
+  const body = JSON.stringify({ type: "metaAndAssetCtxs", dex: CONFIG.hl_dex });
   const r = await fetch("https://api.hyperliquid.xyz/info", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -85,7 +92,8 @@ async function fetchHyperliquid() {
   const universe = (j[0] && j[0].universe) || [];
   const ctxs = j[1] || [];
   for (const t of CONFIG.tickers) {
-    const idx = universe.findIndex(u => u.name.toUpperCase() === t.hl_coin.toUpperCase());
+    const want = normCoin(t.hl_coin);
+    const idx = universe.findIndex(u => normCoin(u.name) === want);
     if (idx >= 0 && ctxs[idx]) {
       out[t.symbol] = {
         mark: parseFloat(ctxs[idx].markPx),
@@ -93,7 +101,7 @@ async function fetchHyperliquid() {
         status: "OK"
       };
     } else {
-      out[t.symbol] = { status: "UNKNOWN_COIN" }; // HIP-3 dex builder: mapping à ajuster en config
+      out[t.symbol] = { status: "UNKNOWN_COIN" };
     }
   }
   return out;
@@ -101,7 +109,7 @@ async function fetchHyperliquid() {
 
 // ---------- Boucle scanner ----------
 const totalFeesPct =
-  CONFIG.assumed_fees_pct.kraken_taker +
+  CONFIG.assumed_fees_pct.spot_taker +
   CONFIG.assumed_fees_pct.hl_taker +
   CONFIG.assumed_fees_pct.slippage_buffer;
 
@@ -109,7 +117,7 @@ async function poll() {
   const now = new Date();
   state.market_open = usMarketOpen(now);
   let kr = {}, hl = {};
-  try { kr = await fetchKraken(); } catch (e) { pushErr("kraken: " + e.message); }
+  try { kr = await fetchBybit(); } catch (e) { pushErr("bybit: " + e.message); }
   try { hl = await fetchHyperliquid(); } catch (e) { pushErr("hyperliquid: " + e.message); }
 
   for (const t of CONFIG.tickers) {
@@ -190,7 +198,7 @@ h1{font-size:20px;margin:0 0 4px}
 .err{color:#f85149;font-size:12px;margin-top:14px}
 </style></head><body>
 <h1>bridge-scanner <span id="mkt" class="badge closed">…</span></h1>
-<div class="sub">Livre 4 · Triangle U/S/F · Phase 1 paper · S = xStocks Kraken · F = perp Hyperliquid · seuil ${CONFIG.dislocation_threshold_pct}% net</div>
+<div class="sub">Livre 4 · Triangle U/S/F · Phase 1 paper · S = xStocks Bybit · F = perp Hyperliquid · seuil ${CONFIG.dislocation_threshold_pct}% net</div>
 <div class="counters">
   <div class="cbox"><div class="v" id="c_det">0</div><div class="l">dislocations</div></div>
   <div class="cbox"><div class="v" id="c_sur">0</div><div class="l">survie 60s</div></div>
