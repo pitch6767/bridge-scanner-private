@@ -1,6 +1,6 @@
 {
   "port": 8085,
-  "update_key": "CHANGE-MOI-vite",
+  "update_key": "9d6966008af510fe3f546bc8c51b6327",
   "poll_interval_sec": 15,
   "dislocation_threshold_pct": 1.0,
   "survival_check_sec": 60,
