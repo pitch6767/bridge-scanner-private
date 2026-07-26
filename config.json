@@ -10,7 +10,7 @@
     "max_open_positions": 36,
     "max_hold_hours": 72,
     "carry": {
-      "enabled": true,
+      "enabled": false,
       "min_apr_pct": 15,
       "exit_apr_pct": 3,
       "exit_patience_hours": 2,
