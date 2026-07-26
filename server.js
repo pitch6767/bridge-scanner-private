@@ -1,7 +1,7 @@
 // bridge-scanner v1 — Livre 4 : triangle U/S/F, phase scanner S-F (paper)
 // Node >= 18, zéro dépendance. Port 8085.
 "use strict";
-const VERSION = "1.13";
+const VERSION = "1.14";
 
 const http = require("http");
 const fs = require("fs");
@@ -129,7 +129,8 @@ async function discoverUniverse() {
         const coins = await hlDexCoins(dex);
         dlog.push(dex + ": " + Object.keys(coins).length + " marches");
         for (const tk of Object.keys(coins)) {
-          if (!hlByTicker[tk]) hlByTicker[tk] = { dex, name: coins[tk] };
+          if (!hlByTicker[tk]) hlByTicker[tk] = { dex, name: coins[tk], dexes: [dex] };
+          else hlByTicker[tk].dexes.push(dex);
         }
       } catch (e) { dlog.push(dex + ": ERREUR " + e.message); }
     }
@@ -168,6 +169,9 @@ async function discoverUniverse() {
         } else { solMissed.push(tk); }
       } catch (e) { solMissed.push(tk + "(err)"); }
     }
+    const multi = Object.keys(hlByTicker).filter(tk => hlByTicker[tk].dexes && hlByTicker[tk].dexes.length > 1)
+      .map(tk => tk + "(" + hlByTicker[tk].dexes.join("+") + ")");
+    dlog.push("multi-dex F-F: [" + multi.slice(0, 15).join(",") + "]");
     dlog.push("ajout Solana: [" + solAdded.join(",") + "]");
     dlog.push("sans jambe S: [" + solMissed.slice(0, 25).join(",") + "]");
     state.discover_log = dlog;
@@ -355,16 +359,42 @@ function paperEngine(symbol, rec, now) {
   if (rec.spread_pct === null) return;
   const open = state.positions.find(p => p.symbol === symbol);
 
+  if (open && rec.f_funding !== null && isFinite(rec.f_funding)) {
+    const dir = open.side === "SHORT_F_LONG_S" ? 1 : -1;
+    open.funding_usd = (open.funding_usd || 0) + rec.f_funding * open.size_usd * (CONFIG.poll_interval_sec / 3600) * dir;
+  }
+
   if (!open) {
+    const CR = P.carry || {};
+    if (CR.enabled && rec.f_funding !== null && state.positions.length < P.max_open_positions
+        && Math.abs(rec.spread_pct) <= (CR.max_spread_entry_pct || 0.15)) {
+      const aprPct = rec.f_funding * 24 * 365 * 100;
+      if (Math.abs(aprPct) >= (CR.min_apr_pct || 12)) {
+        const cpos = {
+          id: Date.now().toString(36) + "-" + symbol,
+          symbol, kind: "CARRY",
+          side: aprPct > 0 ? "SHORT_F_LONG_S" : "LONG_F_SHORT_S",
+          t_open: now.toISOString(),
+          s_open: rec.s_price, f_open: rec.f_price,
+          spread_open_pct: rec.spread_pct,
+          apr_open_pct: Math.round(aprPct * 100) / 100,
+          size_usd: P.size_usd_per_leg, funding_usd: 0,
+          s_depth_usd: null, f_depth_usd: null, max_size_usd: null
+        };
+        state.positions.push(cpos);
+        attachDepth(cpos).catch(() => {});
+        return;
+      }
+    }
     if (Math.abs(rec.spread_net_pct) >= P.entry_net_pct && state.positions.length < P.max_open_positions) {
       const pos = {
         id: Date.now().toString(36) + "-" + symbol,
-        symbol,
+        symbol, kind: "ARB",
         side: rec.spread_pct > 0 ? "SHORT_F_LONG_S" : "LONG_F_SHORT_S",
         t_open: now.toISOString(),
         s_open: rec.s_price, f_open: rec.f_price,
         spread_open_pct: rec.spread_pct,
-        size_usd: P.size_usd_per_leg,
+        size_usd: P.size_usd_per_leg, funding_usd: 0,
         s_depth_usd: null, f_depth_usd: null, max_size_usd: null
       };
       state.positions.push(pos);
@@ -374,22 +404,32 @@ function paperEngine(symbol, rec, now) {
   }
 
   const ageH = (now - new Date(open.t_open)) / 3600000;
-  const converged = Math.abs(rec.spread_pct) <= P.exit_gross_pct;
   const sameSign = Math.sign(rec.spread_pct) === Math.sign(open.spread_open_pct);
-  const timeStop = ageH >= P.max_hold_hours;
+  let shouldClose = false, closeReason = "";
+  if (open.kind === "CARRY") {
+    const CR = P.carry || {};
+    const aprNow = (rec.f_funding || 0) * 24 * 365 * 100;
+    const receiveApr = open.side === "SHORT_F_LONG_S" ? aprNow : -aprNow;
+    if (receiveApr < (CR.exit_apr_pct || 3)) { shouldClose = true; closeReason = "CARRY_APR_BAS"; }
+    else if (ageH >= (CR.max_hold_hours || 336)) { shouldClose = true; closeReason = "TIME_STOP"; }
+  } else {
+    if (Math.abs(rec.spread_pct) <= P.exit_gross_pct) { shouldClose = true; closeReason = "CONVERGENCE"; }
+    else if (ageH >= P.max_hold_hours) { shouldClose = true; closeReason = "TIME_STOP"; }
+    else if (!sameSign) { shouldClose = true; closeReason = "CROSS_ZERO"; }
+  }
 
-  if (converged || timeStop || !sameSign) {
-    // P&L : capture de spread (dans le sens de la position) - frais aller-retour
+  if (shouldClose) {
     const captured = sameSign
       ? Math.abs(open.spread_open_pct) - Math.abs(rec.spread_pct)
-      : Math.abs(open.spread_open_pct) + Math.abs(rec.spread_pct); // le spread a traversé zéro : gain bonus
-    const pnl = (captured - roundTripFeesPct) / 100 * open.size_usd;
+      : Math.abs(open.spread_open_pct) + Math.abs(rec.spread_pct);
+    const pnl = (captured - roundTripFeesPct) / 100 * open.size_usd + (open.funding_usd || 0);
     const closed = Object.assign({}, open, {
       t_close: now.toISOString(),
       s_close: rec.s_price, f_close: rec.f_price,
       spread_close_pct: rec.spread_pct,
+      funding_usd: Math.round((open.funding_usd || 0) * 100) / 100,
       pnl_usd: Math.round(pnl * 100) / 100,
-      reason: converged ? "CONVERGENCE" : (timeStop ? "TIME_STOP" : "CROSS_ZERO")
+      reason: closeReason
     });
     state.history.unshift(closed);
     state.history = state.history.slice(0, 200);
@@ -573,24 +613,27 @@ async function refresh(){
       const capt = cur === null ? null : (sameSign ? Math.abs(p.spread_open_pct) - Math.abs(cur) : Math.abs(p.spread_open_pct) + Math.abs(cur));
       const upnl = capt === null ? null : ((capt - 0.39) / 100 * p.size_usd);
       const d = document.createElement('div'); d.className = 'card';
-      d.innerHTML = '<div class="sym">' + p.symbol + ' <small class="lbl">' + (p.side === 'SHORT_F_LONG_S' ? 'short perp / long spot' : 'long perp / short spot') + '</small></div>'
+      d.innerHTML = '<div class="sym">' + p.symbol + ' <small class="' + (p.kind === 'CARRY' ? 'pos' : 'warn') + '">' + (p.kind || 'ARB') + '</small> <small class="lbl">' + (p.side === 'SHORT_F_LONG_S' ? 'short perp / long spot' : 'long perp / short spot') + '</small></div>'
         + '<div class="row"><span class="lbl">Ouvert</span><span>' + p.t_open.slice(5,16).replace('T',' ') + '</span></div>'
         + '<div class="row"><span class="lbl">Spread entrée</span><span>' + p.spread_open_pct.toFixed(3) + '%</span></div>'
         + '<div class="row"><span class="lbl">Spread actuel</span><span>' + (cur === null ? '–' : cur.toFixed(3) + '%') + '</span></div>'
         + '<div class="row"><span class="lbl">P&L latent</span><span class="' + (upnl === null ? 'lbl' : (upnl >= 0 ? 'pos' : 'neg')) + '">' + (upnl === null ? '–' : '$' + upnl.toFixed(2)) + '</span></div>'
+        + '<div class="row"><span class="lbl">Funding cumulé</span><span class="' + ((p.funding_usd||0) >= 0 ? 'pos' : 'neg') + '">$' + (p.funding_usd||0).toFixed(2) + '</span></div>'
         + '<div class="row"><span class="lbl">Durée</span><span>' + dur(p.t_open, new Date().toISOString()) + '</span></div>'
         + '<div class="row"><span class="lbl">Taille / max possible</span><span>$' + p.size_usd + ' / ' + (p.max_size_usd ? '$' + p.max_size_usd.toLocaleString() : '–') + '</span></div>';
       pg.appendChild(d);
     }
     // historique
     const h = document.getElementById('hist');
-    let rows = '<tr style="color:#8b949e;text-align:left"><th>Clôturé</th><th>Ticker</th><th>Sens</th><th>Entrée</th><th>Sortie</th><th>Raison</th><th>Durée</th><th style="text-align:right">Taille</th><th style="text-align:right">Max possible</th><th style="text-align:right">P&L</th><th style="text-align:right">P&L%</th></tr>';
+    let rows = '<tr style="color:#8b949e;text-align:left"><th>Clôturé</th><th>Ticker</th><th>Type</th><th>Sens</th><th>Entrée</th><th>Sortie</th><th>Raison</th><th>Durée</th><th style="text-align:right">Fund.</th><th style="text-align:right">Taille</th><th style="text-align:right">Max possible</th><th style="text-align:right">P&L</th><th style="text-align:right">P&L%</th></tr>';
     for (const x of s.history.slice(0, 30)){
       rows += '<tr style="border-top:1px solid #21262d"><td>' + x.t_close.slice(5,16).replace('T',' ') + '</td><td><b>' + x.symbol + '</b></td>'
+        + '<td>' + (x.kind || 'ARB') + '</td>'
         + '<td>' + (x.side === 'SHORT_F_LONG_S' ? 'F→S' : 'S→F') + '</td>'
         + '<td>' + x.spread_open_pct.toFixed(2) + '%</td><td>' + x.spread_close_pct.toFixed(2) + '%</td>'
         + '<td>' + x.reason + '</td>'
         + '<td>' + dur(x.t_open, x.t_close) + '</td>'
+        + '<td style="text-align:right">$' + (x.funding_usd||0).toFixed(2) + '</td>'
         + '<td style="text-align:right">$' + x.size_usd + '</td>'
         + '<td style="text-align:right">' + (x.max_size_usd ? '$' + x.max_size_usd.toLocaleString() : '–') + '</td>'
         + '<td style="text-align:right" class="' + (x.pnl_usd >= 0 ? 'pos' : 'neg') + '">$' + x.pnl_usd.toFixed(2) + '</td>'

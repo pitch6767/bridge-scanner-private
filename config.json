@@ -7,8 +7,15 @@
     "entry_net_pct": 0.3,
     "exit_gross_pct": 0.1,
     "size_usd_per_leg": 1000,
-    "max_open_positions": 10,
-    "max_hold_hours": 72
+    "max_open_positions": 36,
+    "max_hold_hours": 72,
+    "carry": {
+      "enabled": true,
+      "min_apr_pct": 12,
+      "exit_apr_pct": 3,
+      "max_spread_entry_pct": 0.15,
+      "max_hold_hours": 336
+    }
   },
   "survival_check_sec": 60,
   "hl_dex": "xyz",
