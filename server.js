@@ -449,7 +449,7 @@ document.getElementById('upd').onclick = async function(){
     let r = await fetch('/api/update?key=' + encodeURIComponent(k));
     let j = await r.json();
     if (j.auth_needed){
-      const t = prompt('Accès GitHub manquant sur le serveur.\nColle un token GitHub (repo access) — il sera enregistré une fois pour toutes :');
+      const t = prompt('Accès GitHub manquant sur le serveur. Colle un token GitHub (repo access) — il sera enregistré une fois pour toutes :');
       if (!t){ this.textContent = 'Mettre à jour'; return; }
       r = await fetch('/api/update?key=' + encodeURIComponent(k) + '&gh_token=' + encodeURIComponent(t.trim()));
       j = await r.json();
