@@ -1,6 +1,7 @@
 // bridge-scanner v1 — Livre 4 : triangle U/S/F, phase scanner S-F (paper)
 // Node >= 18, zéro dépendance. Port 8085.
 "use strict";
+const VERSION = "1.10";
 
 const http = require("http");
 const fs = require("fs");
@@ -20,7 +21,8 @@ let state = {
   history: [],          // paper : positions cloturees + { t_close, s_close, f_close, spread_close_pct, pnl_usd, reason }
   counters: { detected: 0, survived_60s: 0, weekends_logged: 0, trades: 0, wins: 0, pnl_total_usd: 0 },
   weekend_log: [],      // { weekend_of, symbol, spread_fri_22h, spread_mon_open, converged }
-  errors: []
+  errors: [],
+  discover_log: []
 };
 
 try {
@@ -119,14 +121,17 @@ async function discoverUniverse() {
     }
     // 2. Tous les dex HL, et leurs coins
     const dexes = await hlDexList();
+    const dlog = [];
+    dlog.push("dex HL: " + dexes.join(", "));
     const hlByTicker = {}; // ticker -> { dex, name } (premier dex qui le cote)
     for (const dex of dexes) {
       try {
         const coins = await hlDexCoins(dex);
+        dlog.push(dex + ": " + Object.keys(coins).length + " marches");
         for (const tk of Object.keys(coins)) {
-          if (bybitList[tk] && !hlByTicker[tk]) hlByTicker[tk] = { dex, name: coins[tk] };
+          if (!hlByTicker[tk]) hlByTicker[tk] = { dex, name: coins[tk] };
         }
-      } catch (e) { /* dex illisible : on passe */ }
+      } catch (e) { dlog.push(dex + ": ERREUR " + e.message); }
     }
     // 3. Reconstruire l'univers : intersection stricte, entrées manuelles validées
     const manual = CONFIG.tickers.filter(t =>
@@ -148,7 +153,9 @@ async function discoverUniverse() {
       if (newUniverse.length >= CONFIG.max_universe) break;
     }
     // 3b. Actions cotees sur HL mais absentes de Bybit : jambe S via xStock Solana (Jupiter)
+    dlog.push("Bybit xStocks: " + Object.keys(bybitList).length + " | HL tickers: " + Object.keys(hlByTicker).length);
     const missing = Object.keys(hlByTicker).filter(tk => !seen.has(tk)).sort();
+    const solAdded = [], solMissed = [];
     for (const tk of missing) {
       if (newUniverse.length >= CONFIG.max_universe) break;
       if (!/^[A-Z]{1,6}$/.test(tk)) continue;
@@ -157,10 +164,13 @@ async function discoverUniverse() {
         if (mint) {
           newUniverse.push({ symbol: tk, source: "sol", sol_mint: mint,
                              hl_coin: hlByTicker[tk].name, hl_dex: hlByTicker[tk].dex });
-          seen.add(tk);
-        }
-      } catch (e) { /* pas de xStock Solana */ }
+          seen.add(tk); solAdded.push(tk);
+        } else { solMissed.push(tk); }
+      } catch (e) { solMissed.push(tk + "(err)"); }
     }
+    dlog.push("ajout Solana: [" + solAdded.join(",") + "]");
+    dlog.push("sans jambe S: [" + solMissed.slice(0, 25).join(",") + "]");
+    state.discover_log = dlog;
     if (newUniverse.length > 0) UNIVERSE = newUniverse;
     state.universe_size = UNIVERSE.length;
     state.universe_dexes = [...new Set(UNIVERSE.map(t => t.hl_dex))];
@@ -426,8 +436,9 @@ h1{font-size:20px;margin:0 0 4px}
 .cbox .l{font-size:11px;color:#8b949e}
 .err{color:#f85149;font-size:12px;margin-top:14px}
 </style></head><body>
-<h1>bridge-scanner <span id="mkt" class="badge closed">…</span>
+<h1>bridge-scanner <small style="color:#8b949e;font-size:12px">v${VERSION} \u00b7 ${UNIVERSE.length} tickers</small> <span id="mkt" class="badge closed">…</span>
 <button id="upd" style="float:right;background:#21262d;color:#58a6ff;border:1px solid #30363d;border-radius:8px;padding:6px 14px;font-size:12px;cursor:pointer">Mettre à jour</button></h1>
+<div class="sub" id="diag" style="color:#d29922;font-size:12px;margin-bottom:6px"></div>
 <div class="sub">Livre 4 · Triangle U/S/F · Phase 1 paper · S = xStocks Bybit · F = perp Hyperliquid · seuil ${CONFIG.dislocation_threshold_pct}% net</div>
 <div class="counters">
   <div class="cbox"><div class="v" id="c_det">0</div><div class="l">dislocations</div></div>
@@ -449,6 +460,7 @@ async function refresh(){
     const r = await fetch('/api/state'); const s = await r.json();
     document.getElementById('mkt').textContent = s.market_open ? 'NYSE OUVERT (triangle complet)' : 'NYSE FERMÉ (mode S-F, fenêtre edge)';
     document.getElementById('mkt').className = 'badge ' + (s.market_open ? 'open' : 'closed');
+    document.getElementById('diag').textContent = (s.discover_log || []).join('  \u00b7  ');
     document.getElementById('c_det').textContent = s.counters.detected;
     document.getElementById('c_sur').textContent = s.counters.survived_60s;
     document.getElementById('c_rate').textContent = s.counters.detected > 0 ? Math.round(100*s.counters.survived_60s/s.counters.detected)+'%' : '–';
