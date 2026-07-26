@@ -1,7 +1,7 @@
 // bridge-scanner v1 — Livre 4 : triangle U/S/F, phase scanner S-F (paper)
 // Node >= 18, zéro dépendance. Port 8085.
 "use strict";
-const VERSION = "1.17";
+const VERSION = "1.18";
 
 const http = require("http");
 const fs = require("fs");
@@ -30,10 +30,14 @@ try {
   if (fs.existsSync(STATE_FILE)) {
     const prev = JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
     state.dislocations = prev.dislocations || [];
-    state.positions = prev.positions || [];
-    state.history = prev.history || [];
+    state.positions = (prev.positions || []).filter(p => (p.kind || "ARB") !== "CARRY");
+    state.history = (prev.history || []).filter(h => (h.kind || "ARB") !== "CARRY");
     state.sol_mints = prev.sol_mints || {};
     state.counters = Object.assign(state.counters, prev.counters || {});
+    // Purge CARRY : recalcul des compteurs de trades depuis l'historique restant
+    state.counters.trades = state.history.length;
+    state.counters.wins = state.history.filter(h => h.pnl_usd > 0).length;
+    state.counters.pnl_total_usd = Math.round(state.history.reduce((a, h) => a + (h.pnl_usd || 0), 0) * 100) / 100;
     state.weekend_log = prev.weekend_log || [];
   }
 } catch (e) { /* état neuf */ }
