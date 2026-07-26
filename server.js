@@ -1,7 +1,7 @@
 // bridge-scanner v1 — Livre 4 : triangle U/S/F, phase scanner S-F (paper)
 // Node >= 18, zéro dépendance. Port 8085.
 "use strict";
-const VERSION = "1.14";
+const VERSION = "1.15";
 
 const http = require("http");
 const fs = require("fs");
@@ -22,7 +22,8 @@ let state = {
   counters: { detected: 0, survived_60s: 0, weekends_logged: 0, trades: 0, wins: 0, pnl_total_usd: 0 },
   weekend_log: [],      // { weekend_of, symbol, spread_fri_22h, spread_mon_open, converged }
   errors: [],
-  discover_log: []
+  discover_log: [],
+  sol_mints: {}
 };
 
 try {
@@ -31,6 +32,7 @@ try {
     state.dislocations = prev.dislocations || [];
     state.positions = prev.positions || [];
     state.history = prev.history || [];
+    state.sol_mints = prev.sol_mints || {};
     state.counters = Object.assign(state.counters, prev.counters || {});
     state.weekend_log = prev.weekend_log || [];
   }
@@ -185,29 +187,44 @@ async function discoverUniverse() {
 }
 
 // ---------- Jambe S secondaire : xStocks Solana via Jupiter ----------
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
 async function jupFindXStock(ticker) {
+  if (state.sol_mints[ticker]) return state.sol_mints[ticker]; // cache persistant : zero appel
+  await sleep(350); // etalement anti-429
   const q = ticker + "x";
   const r = await fetch("https://lite-api.jup.ag/tokens/v2/search?query=" + encodeURIComponent(q), { signal: AbortSignal.timeout(8000) });
+  if (!r.ok) throw new Error("HTTP " + r.status);
   const j = await r.json();
   const list = Array.isArray(j) ? j : (j.tokens || j.data || []);
   for (const t of list) {
     const sym = String(t.symbol || "").toUpperCase();
     const name = String(t.name || "").toLowerCase();
     if (sym === q.toUpperCase() && name.includes("xstock")) {
-      return t.id || t.address || t.mint || null;
+      const mint = t.id || t.address || t.mint || null;
+      if (mint) { state.sol_mints[ticker] = mint; saveStateAtomic(); }
+      return mint;
     }
   }
   return null;
 }
 
+const jupCache = { prices: {}, ts: 0, backoffUntil: 0 };
+
 async function jupPrices(mints) {
+  const now = Date.now();
+  if (now < jupCache.backoffUntil) return jupCache.prices;          // en penalite : on sert le cache
+  if (now - jupCache.ts < 60000 && jupCache.ts > 0) return jupCache.prices; // prix Solana rafraichis toutes les 60s max
   const out = {};
+  let got429 = false;
   for (let i = 0; i < mints.length; i += 20) {
     const chunk = mints.slice(i, i + 20);
+    if (i > 0) await sleep(500);
     let got = false;
     for (const base of ["https://lite-api.jup.ag/price/v3?ids=", "https://lite-api.jup.ag/price/v2?ids="]) {
       try {
         const r = await fetch(base + chunk.join(","), { signal: AbortSignal.timeout(8000) });
+        if (r.status === 429) { got429 = true; break; }
         if (!r.ok) { pushErr("jup " + (base.includes("v3") ? "v3" : "v2") + ": HTTP " + r.status); continue; }
         const j = await r.json();
         const data = j.data || j;
@@ -223,8 +240,15 @@ async function jupPrices(mints) {
         pushErr("jup: " + e.message);
       }
     }
+    if (got429) break;
   }
-  return out;
+  if (got429) {
+    jupCache.backoffUntil = now + 5 * 60000; // pause 5 min, on sert le dernier cache
+    pushErr("jup: 429 - backoff 5min (cache servi)");
+    return jupCache.prices;
+  }
+  if (Object.keys(out).length) { jupCache.prices = out; jupCache.ts = now; }
+  return jupCache.prices;
 }
 
 async function fetchSpot() {
