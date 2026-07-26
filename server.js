@@ -1,7 +1,7 @@
 // bridge-scanner v1 — Livre 4 : triangle U/S/F, phase scanner S-F (paper)
 // Node >= 18, zéro dépendance. Port 8085.
 "use strict";
-const VERSION = "1.10";
+const VERSION = "1.11";
 
 const http = require("http");
 const fs = require("fs");
@@ -197,16 +197,27 @@ async function jupFindXStock(ticker) {
 }
 
 async function jupPrices(mints) {
-  if (!mints.length) return {};
-  const r = await fetch("https://lite-api.jup.ag/price/v3?ids=" + mints.join(","), { signal: AbortSignal.timeout(8000) });
-  const j = await r.json();
-  const data = j.data || j;
   const out = {};
-  for (const m of mints) {
-    const d = data[m];
-    if (d) {
-      const p = parseFloat(d.usdPrice !== undefined ? d.usdPrice : d.price);
-      if (isFinite(p) && p > 0) out[m] = p;
+  for (let i = 0; i < mints.length; i += 20) {
+    const chunk = mints.slice(i, i + 20);
+    let got = false;
+    for (const base of ["https://lite-api.jup.ag/price/v3?ids=", "https://lite-api.jup.ag/price/v2?ids="]) {
+      try {
+        const r = await fetch(base + chunk.join(","), { signal: AbortSignal.timeout(8000) });
+        if (!r.ok) { pushErr("jup " + (base.includes("v3") ? "v3" : "v2") + ": HTTP " + r.status); continue; }
+        const j = await r.json();
+        const data = j.data || j;
+        for (const m of chunk) {
+          const d = data[m];
+          if (d) {
+            const p = parseFloat(d.usdPrice !== undefined ? d.usdPrice : d.price);
+            if (isFinite(p) && p > 0) { out[m] = p; got = true; }
+          }
+        }
+        if (got) break;
+      } catch (e) {
+        pushErr("jup: " + e.message);
+      }
     }
   }
   return out;
@@ -318,8 +329,12 @@ async function poll() {
       const spread = ((f.mark - s.mid) / s.mid) * 100; // F riche > 0
       rec.spread_pct = round4(spread);
       rec.spread_net_pct = round4(Math.abs(spread) - totalFeesPct) * Math.sign(spread);
-      trackDislocation(t.symbol, rec.spread_net_pct, now);
-      paperEngine(t.symbol, rec, now);
+      if (Math.abs(spread) > 3.0) {
+        rec.s_status = "DATA_SUSPECT"; // prix spot probablement perime/illiquide : on observe, on ne trade pas
+      } else {
+        trackDislocation(t.symbol, rec.spread_net_pct, now);
+        paperEngine(t.symbol, rec, now);
+      }
     } else {
       rec.spread_pct = null; rec.spread_net_pct = null;
     }
@@ -436,7 +451,7 @@ h1{font-size:20px;margin:0 0 4px}
 .cbox .l{font-size:11px;color:#8b949e}
 .err{color:#f85149;font-size:12px;margin-top:14px}
 </style></head><body>
-<h1>bridge-scanner <small style="color:#8b949e;font-size:12px">v${VERSION} \u00b7 ${UNIVERSE.length} tickers</small> <span id="mkt" class="badge closed">…</span>
+<h1>bridge-scanner <small style="color:#8b949e;font-size:12px">v${VERSION} \u00b7 <span id="tkcount">${UNIVERSE.length}</span> tickers</small> <span id="mkt" class="badge closed">…</span>
 <button id="upd" style="float:right;background:#21262d;color:#58a6ff;border:1px solid #30363d;border-radius:8px;padding:6px 14px;font-size:12px;cursor:pointer">Mettre à jour</button></h1>
 <div class="sub" id="diag" style="color:#d29922;font-size:12px;margin-bottom:6px"></div>
 <div class="sub">Livre 4 · Triangle U/S/F · Phase 1 paper · S = xStocks Bybit · F = perp Hyperliquid · seuil ${CONFIG.dislocation_threshold_pct}% net</div>
@@ -461,6 +476,7 @@ async function refresh(){
     document.getElementById('mkt').textContent = s.market_open ? 'NYSE OUVERT (triangle complet)' : 'NYSE FERMÉ (mode S-F, fenêtre edge)';
     document.getElementById('mkt').className = 'badge ' + (s.market_open ? 'open' : 'closed');
     document.getElementById('diag').textContent = (s.discover_log || []).join('  \u00b7  ');
+    document.getElementById('tkcount').textContent = Object.keys(s.tickers).length;
     document.getElementById('c_det').textContent = s.counters.detected;
     document.getElementById('c_sur').textContent = s.counters.survived_60s;
     document.getElementById('c_rate').textContent = s.counters.detected > 0 ? Math.round(100*s.counters.survived_60s/s.counters.detected)+'%' : '–';
