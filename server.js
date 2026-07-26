@@ -135,16 +135,31 @@ async function discoverUniverse() {
     const seen = new Set();
     for (const t of manual) {
       const hl = hlByTicker[t.symbol];
-      newUniverse.push({ symbol: t.symbol, bybit_symbol: bybitList[t.symbol],
+      newUniverse.push({ symbol: t.symbol, source: "bybit", bybit_symbol: bybitList[t.symbol],
                          hl_coin: hl ? hl.name : t.hl_coin,
                          hl_dex: hl ? hl.dex : CONFIG.hl_dex });
       seen.add(t.symbol);
     }
     for (const tk of Object.keys(bybitList).sort()) {
       if (seen.has(tk) || !hlByTicker[tk]) continue;
-      newUniverse.push({ symbol: tk, bybit_symbol: bybitList[tk],
+      newUniverse.push({ symbol: tk, source: "bybit", bybit_symbol: bybitList[tk],
                          hl_coin: hlByTicker[tk].name, hl_dex: hlByTicker[tk].dex });
+      seen.add(tk);
       if (newUniverse.length >= CONFIG.max_universe) break;
+    }
+    // 3b. Actions cotees sur HL mais absentes de Bybit : jambe S via xStock Solana (Jupiter)
+    const missing = Object.keys(hlByTicker).filter(tk => !seen.has(tk)).sort();
+    for (const tk of missing) {
+      if (newUniverse.length >= CONFIG.max_universe) break;
+      if (!/^[A-Z]{1,6}$/.test(tk)) continue;
+      try {
+        const mint = await jupFindXStock(tk);
+        if (mint) {
+          newUniverse.push({ symbol: tk, source: "sol", sol_mint: mint,
+                             hl_coin: hlByTicker[tk].name, hl_dex: hlByTicker[tk].dex });
+          seen.add(tk);
+        }
+      } catch (e) { /* pas de xStock Solana */ }
     }
     if (newUniverse.length > 0) UNIVERSE = newUniverse;
     state.universe_size = UNIVERSE.length;
@@ -155,10 +170,43 @@ async function discoverUniverse() {
   }
 }
 
-async function fetchBybit() {
-  // Jambe S : xStocks sur Bybit spot, API publique v5, un appel par symbole (léger, parallèle)
+// ---------- Jambe S secondaire : xStocks Solana via Jupiter ----------
+async function jupFindXStock(ticker) {
+  const q = ticker + "x";
+  const r = await fetch("https://lite-api.jup.ag/tokens/v2/search?query=" + encodeURIComponent(q), { signal: AbortSignal.timeout(8000) });
+  const j = await r.json();
+  const list = Array.isArray(j) ? j : (j.tokens || j.data || []);
+  for (const t of list) {
+    const sym = String(t.symbol || "").toUpperCase();
+    const name = String(t.name || "").toLowerCase();
+    if (sym === q.toUpperCase() && name.includes("xstock")) {
+      return t.id || t.address || t.mint || null;
+    }
+  }
+  return null;
+}
+
+async function jupPrices(mints) {
+  if (!mints.length) return {};
+  const r = await fetch("https://lite-api.jup.ag/price/v3?ids=" + mints.join(","), { signal: AbortSignal.timeout(8000) });
+  const j = await r.json();
+  const data = j.data || j;
   const out = {};
-  await Promise.all(UNIVERSE.map(async (t) => {
+  for (const m of mints) {
+    const d = data[m];
+    if (d) {
+      const p = parseFloat(d.usdPrice !== undefined ? d.usdPrice : d.price);
+      if (isFinite(p) && p > 0) out[m] = p;
+    }
+  }
+  return out;
+}
+
+async function fetchSpot() {
+  const out = {};
+  const bybitT = UNIVERSE.filter(t => (t.source || "bybit") === "bybit");
+  const solT = UNIVERSE.filter(t => t.source === "sol");
+  const tasks = bybitT.map(async (t) => {
     try {
       const url = "https://api.bybit.com/v5/market/tickers?category=spot&symbol=" + t.bybit_symbol;
       const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
@@ -175,7 +223,21 @@ async function fetchBybit() {
     } catch (e) {
       out[t.symbol] = { status: "ERR" };
     }
-  }));
+  });
+  if (solT.length) {
+    tasks.push((async () => {
+      try {
+        const prices = await jupPrices(solT.map(t => t.sol_mint));
+        for (const t of solT) {
+          const p = prices[t.sol_mint];
+          out[t.symbol] = p ? { mid: p, status: "OK_SOL" } : { status: "NO_SOL_PRICE" };
+        }
+      } catch (e) {
+        for (const t of solT) out[t.symbol] = { status: "ERR" };
+      }
+    })());
+  }
+  await Promise.all(tasks);
   return out;
 }
 
@@ -231,7 +293,7 @@ async function poll() {
   const now = new Date();
   state.market_open = usMarketOpen(now);
   let kr = {}, hl = {};
-  try { kr = await fetchBybit(); } catch (e) { pushErr("bybit: " + e.message); }
+  try { kr = await fetchSpot(); } catch (e) { pushErr("bybit: " + e.message); }
   try { hl = await fetchHyperliquid(); } catch (e) { pushErr("hyperliquid: " + e.message); }
 
   for (const t of UNIVERSE) {
@@ -242,7 +304,7 @@ async function poll() {
     rec.s_price = s.mid || null;
     rec.f_price = f.mark || null;
     rec.f_funding = (f.funding !== undefined) ? f.funding : null;
-    if (s.status === "OK" && f.status === "OK") {
+    if ((s.status === "OK" || s.status === "OK_SOL" || s.status === "OK_LAST") && f.status === "OK") {
       const spread = ((f.mark - s.mid) / s.mid) * 100; // F riche > 0
       rec.spread_pct = round4(spread);
       rec.spread_net_pct = round4(Math.abs(spread) - totalFeesPct) * Math.sign(spread);
