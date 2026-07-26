@@ -1,7 +1,7 @@
 // bridge-scanner v1 — Livre 4 : triangle U/S/F, phase scanner S-F (paper)
 // Node >= 18, zéro dépendance. Port 8085.
 "use strict";
-const VERSION = "1.11";
+const VERSION = "1.12";
 
 const http = require("http");
 const fs = require("fs");
@@ -357,15 +357,18 @@ function paperEngine(symbol, rec, now) {
 
   if (!open) {
     if (Math.abs(rec.spread_net_pct) >= P.entry_net_pct && state.positions.length < P.max_open_positions) {
-      state.positions.push({
+      const pos = {
         id: Date.now().toString(36) + "-" + symbol,
         symbol,
         side: rec.spread_pct > 0 ? "SHORT_F_LONG_S" : "LONG_F_SHORT_S",
         t_open: now.toISOString(),
         s_open: rec.s_price, f_open: rec.f_price,
         spread_open_pct: rec.spread_pct,
-        size_usd: P.size_usd_per_leg
-      });
+        size_usd: P.size_usd_per_leg,
+        s_depth_usd: null, f_depth_usd: null, max_size_usd: null
+      };
+      state.positions.push(pos);
+      attachDepth(pos).catch(() => {});
     }
     return;
   }
@@ -395,6 +398,68 @@ function paperEngine(symbol, rec, now) {
     if (pnl > 0) state.counters.wins++;
     state.counters.pnl_total_usd = Math.round((state.counters.pnl_total_usd + pnl) * 100) / 100;
   }
+}
+
+
+// ---------- Profondeur exécutable au moment du trade ----------
+const DEPTH_BAND_PCT = 0.10; // on cumule les niveaux jusqu'a 0.10% d'impact
+
+async function bybitDepthUsd(symbol, side) {
+  // side "buy": on consomme les asks ; "sell": les bids
+  try {
+    const r = await fetch("https://api.bybit.com/v5/market/orderbook?category=spot&symbol=" + symbol + "&limit=50", { signal: AbortSignal.timeout(6000) });
+    const j = await r.json();
+    const ob = j && j.result;
+    if (!ob) return null;
+    const levels = side === "buy" ? ob.a : ob.b;
+    if (!levels || !levels.length) return null;
+    const best = parseFloat(levels[0][0]);
+    let usd = 0;
+    for (const [pxs, qs] of levels) {
+      const px = parseFloat(pxs), q = parseFloat(qs);
+      if (Math.abs(px - best) / best * 100 > DEPTH_BAND_PCT) break;
+      usd += px * q;
+    }
+    return Math.round(usd);
+  } catch (e) { return null; }
+}
+
+async function hlDepthUsd(coin, side) {
+  try {
+    const r = await fetch("https://api.hyperliquid.xyz/info", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "l2Book", coin }),
+      signal: AbortSignal.timeout(6000)
+    });
+    const j = await r.json();
+    const lv = j && j.levels;
+    if (!lv || lv.length < 2) return null;
+    const levels = side === "buy" ? lv[1] : lv[0]; // [bids, asks]
+    if (!levels || !levels.length) return null;
+    const best = parseFloat(levels[0].px);
+    let usd = 0;
+    for (const l of levels) {
+      const px = parseFloat(l.px), q = parseFloat(l.sz);
+      if (Math.abs(px - best) / best * 100 > DEPTH_BAND_PCT) break;
+      usd += px * q;
+    }
+    return Math.round(usd);
+  } catch (e) { return null; }
+}
+
+async function attachDepth(pos) {
+  const t = UNIVERSE.find(x => x.symbol === pos.symbol);
+  if (!t) return;
+  // SHORT_F_LONG_S : on achete S (asks) et on vend F (bids) ; inverse sinon
+  const sSide = pos.side === "SHORT_F_LONG_S" ? "buy" : "sell";
+  const fSide = pos.side === "SHORT_F_LONG_S" ? "sell" : "buy";
+  const [sD, fD] = await Promise.all([
+    (t.source || "bybit") === "bybit" ? bybitDepthUsd(t.bybit_symbol, sSide) : Promise.resolve(null),
+    hlDepthUsd(t.hl_coin, fSide)
+  ]);
+  pos.s_depth_usd = sD;   // null = DEX onchain, profondeur non mesuree en v1
+  pos.f_depth_usd = fD;
+  pos.max_size_usd = (sD !== null && fD !== null) ? Math.min(sD, fD) : (fD !== null ? fD : sD);
 }
 
 function trackDislocation(symbol, netPct, now) {
@@ -512,18 +577,22 @@ async function refresh(){
         + '<div class="row"><span class="lbl">Ouvert</span><span>' + p.t_open.slice(5,16).replace('T',' ') + '</span></div>'
         + '<div class="row"><span class="lbl">Spread entrée</span><span>' + p.spread_open_pct.toFixed(3) + '%</span></div>'
         + '<div class="row"><span class="lbl">Spread actuel</span><span>' + (cur === null ? '–' : cur.toFixed(3) + '%') + '</span></div>'
-        + '<div class="row"><span class="lbl">P&L latent</span><span class="' + (upnl === null ? 'lbl' : (upnl >= 0 ? 'pos' : 'neg')) + '">' + (upnl === null ? '–' : '$' + upnl.toFixed(2)) + '</span></div>';
+        + '<div class="row"><span class="lbl">P&L latent</span><span class="' + (upnl === null ? 'lbl' : (upnl >= 0 ? 'pos' : 'neg')) + '">' + (upnl === null ? '–' : '$' + upnl.toFixed(2)) + '</span></div>'
+        + '<div class="row"><span class="lbl">Taille / max possible</span><span>$' + p.size_usd + ' / ' + (p.max_size_usd ? '$' + p.max_size_usd.toLocaleString() : '–') + '</span></div>';
       pg.appendChild(d);
     }
     // historique
     const h = document.getElementById('hist');
-    let rows = '<tr style="color:#8b949e;text-align:left"><th>Clôturé</th><th>Ticker</th><th>Sens</th><th>Entrée</th><th>Sortie</th><th>Raison</th><th style="text-align:right">P&L</th></tr>';
+    let rows = '<tr style="color:#8b949e;text-align:left"><th>Clôturé</th><th>Ticker</th><th>Sens</th><th>Entrée</th><th>Sortie</th><th>Raison</th><th style="text-align:right">Taille</th><th style="text-align:right">Max possible</th><th style="text-align:right">P&L</th><th style="text-align:right">P&L%</th></tr>';
     for (const x of s.history.slice(0, 30)){
       rows += '<tr style="border-top:1px solid #21262d"><td>' + x.t_close.slice(5,16).replace('T',' ') + '</td><td><b>' + x.symbol + '</b></td>'
         + '<td>' + (x.side === 'SHORT_F_LONG_S' ? 'F→S' : 'S→F') + '</td>'
         + '<td>' + x.spread_open_pct.toFixed(2) + '%</td><td>' + x.spread_close_pct.toFixed(2) + '%</td>'
         + '<td>' + x.reason + '</td>'
-        + '<td style="text-align:right" class="' + (x.pnl_usd >= 0 ? 'pos' : 'neg') + '">$' + x.pnl_usd.toFixed(2) + '</td></tr>';
+        + '<td style="text-align:right">$' + x.size_usd + '</td>'
+        + '<td style="text-align:right">' + (x.max_size_usd ? '$' + x.max_size_usd.toLocaleString() : '–') + '</td>'
+        + '<td style="text-align:right" class="' + (x.pnl_usd >= 0 ? 'pos' : 'neg') + '">$' + x.pnl_usd.toFixed(2) + '</td>'
+        + '<td style="text-align:right" class="' + (x.pnl_usd >= 0 ? 'pos' : 'neg') + '">' + (100 * x.pnl_usd / x.size_usd).toFixed(2) + '%</td></tr>';
     }
     h.innerHTML = rows;
     document.getElementById('errs').textContent = (s.errors[0] ? 'Dernière erreur: ' + s.errors[0].t + ' ' + s.errors[0].msg : '');
