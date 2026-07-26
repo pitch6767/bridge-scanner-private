@@ -1,7 +1,7 @@
 // bridge-scanner v1 — Livre 4 : triangle U/S/F, phase scanner S-F (paper)
 // Node >= 18, zéro dépendance. Port 8085.
 "use strict";
-const VERSION = "1.15";
+const VERSION = "1.16";
 
 const http = require("http");
 const fs = require("fs");
@@ -353,6 +353,12 @@ async function poll() {
     rec.s_price = s.mid || null;
     rec.f_price = f.mark || null;
     rec.f_funding = (f.funding !== undefined) ? f.funding : null;
+    if (rec.f_funding !== null && isFinite(rec.f_funding)) {
+      rec.funding_ema = rec.funding_ema === undefined || rec.funding_ema === null
+        ? rec.f_funding
+        : rec.funding_ema + 0.008 * (rec.f_funding - rec.funding_ema); // ~30min de lissage a 15s/poll
+      rec.funding_obs = (rec.funding_obs || 0) + 1;
+    }
     if ((s.status === "OK" || s.status === "OK_SOL" || s.status === "OK_LAST") && f.status === "OK") {
       const spread = ((f.mark - s.mid) / s.mid) * 100; // F riche > 0
       rec.spread_pct = round4(spread);
@@ -390,10 +396,12 @@ function paperEngine(symbol, rec, now) {
 
   if (!open) {
     const CR = P.carry || {};
-    if (CR.enabled && rec.f_funding !== null && state.positions.length < P.max_open_positions
+    if (CR.enabled && rec.funding_ema !== undefined && rec.funding_ema !== null
+        && (rec.funding_obs || 0) >= (CR.min_obs || 60)
+        && state.positions.length < P.max_open_positions
         && Math.abs(rec.spread_pct) <= (CR.max_spread_entry_pct || 0.15)) {
-      const aprPct = rec.f_funding * 24 * 365 * 100;
-      if (Math.abs(aprPct) >= (CR.min_apr_pct || 12)) {
+      const aprPct = rec.funding_ema * 24 * 365 * 100;
+      if (Math.abs(aprPct) >= (CR.min_apr_pct || 15)) {
         const cpos = {
           id: Date.now().toString(36) + "-" + symbol,
           symbol, kind: "CARRY",
@@ -432,10 +440,21 @@ function paperEngine(symbol, rec, now) {
   let shouldClose = false, closeReason = "";
   if (open.kind === "CARRY") {
     const CR = P.carry || {};
-    const aprNow = (rec.f_funding || 0) * 24 * 365 * 100;
-    const receiveApr = open.side === "SHORT_F_LONG_S" ? aprNow : -aprNow;
-    if (receiveApr < (CR.exit_apr_pct || 3)) { shouldClose = true; closeReason = "CARRY_APR_BAS"; }
-    else if (ageH >= (CR.max_hold_hours || 336)) { shouldClose = true; closeReason = "TIME_STOP"; }
+    const emaApr = (rec.funding_ema !== undefined && rec.funding_ema !== null ? rec.funding_ema : (rec.f_funding || 0)) * 24 * 365 * 100;
+    const receiveApr = open.side === "SHORT_F_LONG_S" ? emaApr : -emaApr;
+    if (receiveApr < (CR.exit_apr_pct || 3)) {
+      if (!open.below_since) open.below_since = now.toISOString();
+    } else {
+      open.below_since = null;
+    }
+    const belowH = open.below_since ? (now - new Date(open.below_since)) / 3600000 : 0;
+    if (receiveApr < (CR.hard_exit_apr_pct !== undefined ? CR.hard_exit_apr_pct : -10) && belowH >= 0.25) {
+      shouldClose = true; closeReason = "CARRY_PAIE";
+    } else if (ageH >= (CR.min_hold_hours || 6) && belowH >= (CR.exit_patience_hours || 2)) {
+      shouldClose = true; closeReason = "CARRY_APR_BAS";
+    } else if (ageH >= (CR.max_hold_hours || 336)) {
+      shouldClose = true; closeReason = "TIME_STOP";
+    }
   } else {
     if (Math.abs(rec.spread_pct) <= P.exit_gross_pct) { shouldClose = true; closeReason = "CONVERGENCE"; }
     else if (ageH >= P.max_hold_hours) { shouldClose = true; closeReason = "TIME_STOP"; }
@@ -446,7 +465,8 @@ function paperEngine(symbol, rec, now) {
     const captured = sameSign
       ? Math.abs(open.spread_open_pct) - Math.abs(rec.spread_pct)
       : Math.abs(open.spread_open_pct) + Math.abs(rec.spread_pct);
-    const pnl = (captured - roundTripFeesPct) / 100 * open.size_usd + (open.funding_usd || 0);
+    const feesPct = open.kind === "CARRY" ? ((P.carry || {}).fees_roundtrip_pct || 0.15) : roundTripFeesPct;
+    const pnl = (captured - feesPct) / 100 * open.size_usd + (open.funding_usd || 0);
     const closed = Object.assign({}, open, {
       t_close: now.toISOString(),
       s_close: rec.s_price, f_close: rec.f_price,

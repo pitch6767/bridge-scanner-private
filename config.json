@@ -11,10 +11,15 @@
     "max_hold_hours": 72,
     "carry": {
       "enabled": true,
-      "min_apr_pct": 12,
+      "min_apr_pct": 15,
       "exit_apr_pct": 3,
+      "exit_patience_hours": 2,
+      "min_hold_hours": 6,
+      "hard_exit_apr_pct": -10,
+      "fees_roundtrip_pct": 0.15,
       "max_spread_entry_pct": 0.15,
-      "max_hold_hours": 336
+      "max_hold_hours": 336,
+      "min_obs": 60
     }
   },
   "survival_check_sec": 60,
