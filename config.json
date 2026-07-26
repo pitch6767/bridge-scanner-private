@@ -2,29 +2,49 @@
   "port": 8085,
   "update_key": "9d6966008af510fe3f546bc8c51b6327",
   "poll_interval_sec": 15,
-  "dislocation_threshold_pct": 1.0,
+  "dislocation_threshold_pct": 0.5,
   "paper": {
-    "entry_net_pct": 1.0,
-    "exit_gross_pct": 0.20,
+    "entry_net_pct": 0.3,
+    "exit_gross_pct": 0.1,
     "size_usd_per_leg": 1000,
-    "max_open_positions": 3,
+    "max_open_positions": 10,
     "max_hold_hours": 72
   },
   "survival_check_sec": 60,
   "hl_dex": "xyz",
   "assumed_fees_pct": {
-    "spot_taker": 0.10,
+    "spot_taker": 0.1,
     "hl_taker": 0.045,
-    "slippage_buffer": 0.10
+    "slippage_buffer": 0.1
   },
   "auto_discover": true,
   "max_universe": 40,
   "tickers": [
-    { "symbol": "TSLA", "bybit_symbol": "TSLAXUSDT", "hl_coin": "xyz:TSLA" },
-    { "symbol": "NVDA", "bybit_symbol": "NVDAXUSDT", "hl_coin": "xyz:NVDA" },
-    { "symbol": "AAPL", "bybit_symbol": "AAPLXUSDT", "hl_coin": "xyz:AAPL" },
-    { "symbol": "MSTR", "bybit_symbol": "MSTRXUSDT", "hl_coin": "xyz:MSTR" },
-    { "symbol": "COIN", "bybit_symbol": "COINXUSDT", "hl_coin": "xyz:COIN" }
+    {
+      "symbol": "TSLA",
+      "bybit_symbol": "TSLAXUSDT",
+      "hl_coin": "xyz:TSLA"
+    },
+    {
+      "symbol": "NVDA",
+      "bybit_symbol": "NVDAXUSDT",
+      "hl_coin": "xyz:NVDA"
+    },
+    {
+      "symbol": "AAPL",
+      "bybit_symbol": "AAPLXUSDT",
+      "hl_coin": "xyz:AAPL"
+    },
+    {
+      "symbol": "MSTR",
+      "bybit_symbol": "MSTRXUSDT",
+      "hl_coin": "xyz:MSTR"
+    },
+    {
+      "symbol": "COIN",
+      "bybit_symbol": "COINXUSDT",
+      "hl_coin": "xyz:COIN"
+    }
   ],
   "note": "Jambe S = Bybit spot xStocks (API publique v5). AAPL = APPLX sur Bybit. Jambe F = perps equity HIP-3 sur le dex builder xyz d'Hyperliquid. SPY/QQQ retires (absents du dex xyz)."
 }
