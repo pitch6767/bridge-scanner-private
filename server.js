@@ -397,8 +397,14 @@ document.getElementById('upd').onclick = async function(){
   if (!k) return;
   this.textContent = '…';
   try{
-    const r = await fetch('/api/update?key=' + encodeURIComponent(k));
-    const j = await r.json();
+    let r = await fetch('/api/update?key=' + encodeURIComponent(k));
+    let j = await r.json();
+    if (j.auth_needed){
+      const t = prompt('Accès GitHub manquant sur le serveur.\nColle un token GitHub (repo access) — il sera enregistré une fois pour toutes :');
+      if (!t){ this.textContent = 'Mettre à jour'; return; }
+      r = await fetch('/api/update?key=' + encodeURIComponent(k) + '&gh_token=' + encodeURIComponent(t.trim()));
+      j = await r.json();
+    }
     if (j.ok && j.restart){
       this.textContent = 'Redémarrage…';
       setTimeout(function(){ location.reload(); }, 6000);
@@ -425,20 +431,38 @@ function handleUpdate(req, res, urlObj) {
     res.end(JSON.stringify({ ok: false, msg: "clé invalide" }));
     return;
   }
-  execFile("git", ["-C", __dirname, "pull", "--ff-only"], { timeout: 30000 }, (err, stdout, stderr) => {
-    const out = (stdout || "") + (stderr || "");
-    if (err) {
-      res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: false, msg: out || err.message }));
-      return;
-    }
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ok: true, msg: out.trim(), restart: !/Already up to date/i.test(out) }));
-    if (!/Already up to date/i.test(out)) {
-      saveStateAtomic();
-      setTimeout(() => process.exit(0), 800); // systemd relance le service avec le nouveau code
-    }
-  });
+  const ghToken = urlObj.searchParams.get("gh_token") || "";
+  const doPull = () => {
+    execFile("git", ["-C", __dirname, "pull", "--ff-only"], { timeout: 30000 }, (err, stdout, stderr) => {
+      const out = (stdout || "") + (stderr || "");
+      if (err) {
+        const authFail = /could not read Username|Authentication failed|403/i.test(out);
+        res.writeHead(authFail ? 401 : 500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, auth_needed: authFail, msg: out.trim() || err.message }));
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, msg: out.trim(), restart: !/Already up to date/i.test(out) }));
+      if (!/Already up to date/i.test(out)) {
+        saveStateAtomic();
+        setTimeout(() => process.exit(0), 800); // systemd relance le service avec le nouveau code
+      }
+    });
+  };
+  if (ghToken) {
+    // Le dashboard a fourni un token : on configure le remote puis on pull (zéro terminal)
+    const url = "https://pitch6767:" + ghToken + "@github.com/pitch6767/bridge-scanner-private.git";
+    execFile("git", ["-C", __dirname, "remote", "set-url", "origin", url], { timeout: 10000 }, (err) => {
+      if (err) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, msg: "set-url: " + err.message }));
+        return;
+      }
+      doPull();
+    });
+  } else {
+    doPull();
+  }
 }
 
 const server = http.createServer((req, res) => {
