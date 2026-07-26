@@ -70,51 +70,86 @@ function bybitToTicker(sym) {
   return sym.slice(0, -5);
 }
 
+async function hlDexList() {
+  try {
+    const r = await fetch("https://api.hyperliquid.xyz/info", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "perpDexs" }),
+      signal: AbortSignal.timeout(10000)
+    });
+    const j = await r.json();
+    const names = (Array.isArray(j) ? j : [])
+      .map(x => typeof x === "string" ? x : (x && x.name))
+      .filter(n => n && n !== "");
+    if (!names.includes(CONFIG.hl_dex)) names.push(CONFIG.hl_dex);
+    return names;
+  } catch (e) {
+    pushErr("perpDexs: " + e.message);
+    return [CONFIG.hl_dex];
+  }
+}
+
+async function hlDexCoins(dex) {
+  const r = await fetch("https://api.hyperliquid.xyz/info", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ type: "metaAndAssetCtxs", dex }),
+    signal: AbortSignal.timeout(10000)
+  });
+  const j = await r.json();
+  const universe = (j[0] && j[0].universe) || [];
+  const out = {};
+  for (const u of universe) {
+    if (u.isDelisted) continue;
+    out[normCoin(u.name)] = u.name;
+  }
+  return out;
+}
+
 async function discoverUniverse() {
   if (!CONFIG.auto_discover) return;
   try {
-    const [bybitList, hlList] = await Promise.all([
-      (async () => {
-        const r = await fetch("https://api.bybit.com/v5/market/instruments-info?category=spot&symbolType=xstocks&limit=200", { signal: AbortSignal.timeout(10000) });
-        const j = await r.json();
-        const list = (j && j.result && j.result.list) || [];
-        const out = {};
-        for (const it of list) {
-          if (it.status && it.status !== "Trading") continue;
-          const tk = bybitToTicker(it.symbol);
-          if (tk) out[tk] = it.symbol;
-        }
-        return out;
-      })(),
-      (async () => {
-        const r = await fetch("https://api.hyperliquid.xyz/info", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ type: "metaAndAssetCtxs", dex: CONFIG.hl_dex }),
-          signal: AbortSignal.timeout(10000)
-        });
-        const j = await r.json();
-        const universe = (j[0] && j[0].universe) || [];
-        const out = {};
-        for (const u of universe) {
-          if (u.isDelisted) continue;
-          out[normCoin(u.name)] = u.name;
-        }
-        return out;
-      })()
-    ]);
-    const known = new Set(UNIVERSE.map(t => t.symbol));
-    let added = 0;
-    for (const tk of Object.keys(bybitList).sort()) {
-      if (known.has(tk)) continue;
-      if (hlList[tk] !== undefined) {
-        UNIVERSE.push({ symbol: tk, bybit_symbol: bybitList[tk], hl_coin: hlList[tk] });
-        added++;
-        if (UNIVERSE.length >= CONFIG.max_universe) break;
-      }
+    // 1. Tous les xStocks cotés sur Bybit
+    const r = await fetch("https://api.bybit.com/v5/market/instruments-info?category=spot&symbolType=xstocks&limit=200", { signal: AbortSignal.timeout(10000) });
+    const j = await r.json();
+    const bybitList = {};
+    for (const it of ((j && j.result && j.result.list) || [])) {
+      if (it.status && it.status !== "Trading") continue;
+      const tk = bybitToTicker(it.symbol);
+      if (tk) bybitList[tk] = it.symbol;
     }
+    // 2. Tous les dex HL, et leurs coins
+    const dexes = await hlDexList();
+    const hlByTicker = {}; // ticker -> { dex, name } (premier dex qui le cote)
+    for (const dex of dexes) {
+      try {
+        const coins = await hlDexCoins(dex);
+        for (const tk of Object.keys(coins)) {
+          if (bybitList[tk] && !hlByTicker[tk]) hlByTicker[tk] = { dex, name: coins[tk] };
+        }
+      } catch (e) { /* dex illisible : on passe */ }
+    }
+    // 3. Reconstruire l'univers : intersection stricte, entrées manuelles validées
+    const manual = CONFIG.tickers.filter(t =>
+      bybitList[t.symbol] && (hlByTicker[t.symbol] || t.hl_coin));
+    const newUniverse = [];
+    const seen = new Set();
+    for (const t of manual) {
+      const hl = hlByTicker[t.symbol];
+      newUniverse.push({ symbol: t.symbol, bybit_symbol: bybitList[t.symbol],
+                         hl_coin: hl ? hl.name : t.hl_coin,
+                         hl_dex: hl ? hl.dex : CONFIG.hl_dex });
+      seen.add(t.symbol);
+    }
+    for (const tk of Object.keys(bybitList).sort()) {
+      if (seen.has(tk) || !hlByTicker[tk]) continue;
+      newUniverse.push({ symbol: tk, bybit_symbol: bybitList[tk],
+                         hl_coin: hlByTicker[tk].name, hl_dex: hlByTicker[tk].dex });
+      if (newUniverse.length >= CONFIG.max_universe) break;
+    }
+    if (newUniverse.length > 0) UNIVERSE = newUniverse;
     state.universe_size = UNIVERSE.length;
-    state.universe_discovered = added;
-    console.log("univers: " + UNIVERSE.length + " tickers (" + added + " decouverts)");
+    state.universe_dexes = [...new Set(UNIVERSE.map(t => t.hl_dex))];
+    console.log("univers: " + UNIVERSE.length + " tickers sur dex [" + state.universe_dexes.join(",") + "]");
   } catch (e) {
     pushErr("discover: " + e.message);
   }
@@ -145,29 +180,43 @@ async function fetchBybit() {
 }
 
 async function fetchHyperliquid() {
-  const body = JSON.stringify({ type: "metaAndAssetCtxs", dex: CONFIG.hl_dex });
-  const r = await fetch("https://api.hyperliquid.xyz/info", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body,
-    signal: AbortSignal.timeout(8000)
-  });
-  const j = await r.json();
   const out = {};
-  const universe = (j[0] && j[0].universe) || [];
-  const ctxs = j[1] || [];
+  const dexes = [...new Set(UNIVERSE.map(t => t.hl_dex || CONFIG.hl_dex))];
+  const byDex = {};
+  await Promise.all(dexes.map(async (dex) => {
+    try { byDex[dex] = await hlDexCoinsCtx(dex); } catch (e) { byDex[dex] = null; pushErr("hl " + dex + ": " + e.message); }
+  }));
   for (const t of UNIVERSE) {
+    const dex = t.hl_dex || CONFIG.hl_dex;
+    const data = byDex[dex];
+    if (!data) { out[t.symbol] = { status: "NO_DATA" }; continue; }
     const want = normCoin(t.hl_coin);
-    const idx = universe.findIndex(u => normCoin(u.name) === want);
-    if (idx >= 0 && ctxs[idx]) {
-      out[t.symbol] = {
-        mark: parseFloat(ctxs[idx].markPx),
-        funding: parseFloat(ctxs[idx].funding || 0),
-        status: "OK"
-      };
+    const hit = data[want];
+    if (hit) {
+      out[t.symbol] = { mark: hit.mark, funding: hit.funding, status: "OK" };
     } else {
       out[t.symbol] = { status: "UNKNOWN_COIN" };
     }
+  }
+  return out;
+}
+
+async function hlDexCoinsCtx(dex) {
+  const r = await fetch("https://api.hyperliquid.xyz/info", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ type: "metaAndAssetCtxs", dex }),
+    signal: AbortSignal.timeout(8000)
+  });
+  const j = await r.json();
+  const universe = (j[0] && j[0].universe) || [];
+  const ctxs = j[1] || [];
+  const out = {};
+  for (let i = 0; i < universe.length; i++) {
+    if (universe[i].isDelisted || !ctxs[i]) continue;
+    out[normCoin(universe[i].name)] = {
+      mark: parseFloat(ctxs[i].markPx),
+      funding: parseFloat(ctxs[i].funding || 0)
+    };
   }
   return out;
 }
@@ -473,7 +522,7 @@ const server = http.createServer((req, res) => {
   } else if (urlObj.pathname === "/api/update") {
     handleUpdate(req, res, urlObj);
   } else if (urlObj.pathname === "/" || urlObj.pathname === "/dashboard") {
-    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
     res.end(dashboardHTML());
   } else {
     res.writeHead(404); res.end("not found");
