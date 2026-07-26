@@ -1,7 +1,7 @@
 // bridge-scanner v1 — Livre 4 : triangle U/S/F, phase scanner S-F (paper)
 // Node >= 18, zéro dépendance. Port 8085.
 "use strict";
-const VERSION = "1.12";
+const VERSION = "1.13";
 
 const http = require("http");
 const fs = require("fs");
@@ -578,17 +578,19 @@ async function refresh(){
         + '<div class="row"><span class="lbl">Spread entrée</span><span>' + p.spread_open_pct.toFixed(3) + '%</span></div>'
         + '<div class="row"><span class="lbl">Spread actuel</span><span>' + (cur === null ? '–' : cur.toFixed(3) + '%') + '</span></div>'
         + '<div class="row"><span class="lbl">P&L latent</span><span class="' + (upnl === null ? 'lbl' : (upnl >= 0 ? 'pos' : 'neg')) + '">' + (upnl === null ? '–' : '$' + upnl.toFixed(2)) + '</span></div>'
+        + '<div class="row"><span class="lbl">Durée</span><span>' + dur(p.t_open, new Date().toISOString()) + '</span></div>'
         + '<div class="row"><span class="lbl">Taille / max possible</span><span>$' + p.size_usd + ' / ' + (p.max_size_usd ? '$' + p.max_size_usd.toLocaleString() : '–') + '</span></div>';
       pg.appendChild(d);
     }
     // historique
     const h = document.getElementById('hist');
-    let rows = '<tr style="color:#8b949e;text-align:left"><th>Clôturé</th><th>Ticker</th><th>Sens</th><th>Entrée</th><th>Sortie</th><th>Raison</th><th style="text-align:right">Taille</th><th style="text-align:right">Max possible</th><th style="text-align:right">P&L</th><th style="text-align:right">P&L%</th></tr>';
+    let rows = '<tr style="color:#8b949e;text-align:left"><th>Clôturé</th><th>Ticker</th><th>Sens</th><th>Entrée</th><th>Sortie</th><th>Raison</th><th>Durée</th><th style="text-align:right">Taille</th><th style="text-align:right">Max possible</th><th style="text-align:right">P&L</th><th style="text-align:right">P&L%</th></tr>';
     for (const x of s.history.slice(0, 30)){
       rows += '<tr style="border-top:1px solid #21262d"><td>' + x.t_close.slice(5,16).replace('T',' ') + '</td><td><b>' + x.symbol + '</b></td>'
         + '<td>' + (x.side === 'SHORT_F_LONG_S' ? 'F→S' : 'S→F') + '</td>'
         + '<td>' + x.spread_open_pct.toFixed(2) + '%</td><td>' + x.spread_close_pct.toFixed(2) + '%</td>'
         + '<td>' + x.reason + '</td>'
+        + '<td>' + dur(x.t_open, x.t_close) + '</td>'
         + '<td style="text-align:right">$' + x.size_usd + '</td>'
         + '<td style="text-align:right">' + (x.max_size_usd ? '$' + x.max_size_usd.toLocaleString() : '–') + '</td>'
         + '<td style="text-align:right" class="' + (x.pnl_usd >= 0 ? 'pos' : 'neg') + '">$' + x.pnl_usd.toFixed(2) + '</td>'
@@ -597,6 +599,15 @@ async function refresh(){
     h.innerHTML = rows;
     document.getElementById('errs').textContent = (s.errors[0] ? 'Dernière erreur: ' + s.errors[0].t + ' ' + s.errors[0].msg : '');
   }catch(e){ document.getElementById('errs').textContent = 'refresh: ' + e.message; }
+}
+function dur(a, b){
+  var ms = new Date(b) - new Date(a);
+  if (!isFinite(ms) || ms < 0) return '–';
+  var m = Math.floor(ms / 60000);
+  if (m < 60) return m + 'min';
+  var h = Math.floor(m / 60);
+  if (h < 48) return h + 'h' + String(m % 60).padStart(2, '0');
+  return Math.floor(h / 24) + 'j' + (h % 24) + 'h';
 }
 function fmt(x, suf){ if (x === null || x === undefined) return '–'; return (typeof x === 'number' ? x.toFixed(suf ? 3 : 2) : x) + (suf || ''); }
 refresh(); setInterval(refresh, 10000);
