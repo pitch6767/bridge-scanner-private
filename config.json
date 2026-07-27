@@ -1,11 +1,11 @@
 {
   "port": 8085,
   "update_key": "9d6966008af510fe3f546bc8c51b6327",
-  "poll_interval_sec": 15,
+  "poll_interval_sec": 10,
   "dislocation_threshold_pct": 0.5,
   "paper": {
-    "entry_net_pct": 0.3,
-    "exit_gross_pct": 0.1,
+    "entry_net_pct": 0.25,
+    "exit_gross_pct": 0.08,
     "size_usd_per_leg": 1000,
     "max_open_positions": 36,
     "max_hold_hours": 72,
@@ -20,14 +20,17 @@
       "max_spread_entry_pct": 0.15,
       "max_hold_hours": 336,
       "min_obs": 60
-    }
+    },
+    "capture_frac": 0.7,
+    "max_units_per_ticker": 2,
+    "unit_spacing_pct": 0.3
   },
   "survival_check_sec": 60,
   "hl_dex": "xyz",
   "assumed_fees_pct": {
     "spot_taker": 0.1,
     "hl_taker": 0.045,
-    "slippage_buffer": 0.1
+    "slippage_buffer": 0.05
   },
   "auto_discover": true,
   "max_universe": 40,

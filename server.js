@@ -1,7 +1,7 @@
 // bridge-scanner v1 — Livre 4 : triangle U/S/F, phase scanner S-F (paper)
 // Node >= 18, zéro dépendance. Port 8085.
 "use strict";
-const VERSION = "1.18";
+const VERSION = "1.19";
 
 const http = require("http");
 const fs = require("fs");
@@ -215,10 +215,11 @@ async function jupFindXStock(ticker) {
 
 const jupCache = { prices: {}, ts: 0, backoffUntil: 0 };
 
-async function jupPrices(mints) {
+async function jupPrices(mints, force) {
   const now = Date.now();
   if (now < jupCache.backoffUntil) return jupCache.prices;          // en penalite : on sert le cache
-  if (now - jupCache.ts < 60000 && jupCache.ts > 0) return jupCache.prices; // prix Solana rafraichis toutes les 60s max
+  const maxAge = force ? 10000 : 60000; // le perp a bouge -> on force (min 10s quand meme)
+  if (now - jupCache.ts < maxAge && jupCache.ts > 0) return jupCache.prices;
   const out = {};
   let got429 = false;
   for (let i = 0; i < mints.length; i += 20) {
@@ -278,9 +279,25 @@ async function fetchSpot() {
     }
   });
   if (solT.length) {
+    // Le perp mene la decouverte de prix : s'il a bouge >0.15% depuis le dernier fetch Solana, on force
+    if (!jupCache.refF) jupCache.refF = {};
+    let force = false;
+    for (const t of solT) {
+      const cur = state.tickers[t.symbol] && state.tickers[t.symbol].f_price;
+      const ref = jupCache.refF[t.symbol];
+      if (cur && ref && Math.abs(cur - ref) / ref * 100 > 0.15) { force = true; break; }
+      if (cur && !ref) jupCache.refF[t.symbol] = cur;
+    }
     tasks.push((async () => {
       try {
-        const prices = await jupPrices(solT.map(t => t.sol_mint));
+        const before = jupCache.ts;
+        const prices = await jupPrices(solT.map(t => t.sol_mint), force);
+        if (jupCache.ts !== before) {
+          for (const t of solT) {
+            const cur = state.tickers[t.symbol] && state.tickers[t.symbol].f_price;
+            if (cur) jupCache.refF[t.symbol] = cur;
+          }
+        }
         for (const t of solT) {
           const p = prices[t.sol_mint];
           out[t.symbol] = p ? { mid: p, status: "OK_SOL" } : { status: "NO_SOL_PRICE" };
@@ -391,41 +408,26 @@ const roundTripFeesPct = 2 * (CONFIG.assumed_fees_pct.spot_taker + CONFIG.assume
 
 function paperEngine(symbol, rec, now) {
   if (rec.spread_pct === null) return;
-  const open = state.positions.find(p => p.symbol === symbol);
+  const opens = state.positions.filter(p => p.symbol === symbol);
 
-  if (open && rec.f_funding !== null && isFinite(rec.f_funding)) {
-    const dir = open.side === "SHORT_F_LONG_S" ? 1 : -1;
-    open.funding_usd = (open.funding_usd || 0) + rec.f_funding * open.size_usd * (CONFIG.poll_interval_sec / 3600) * dir;
+  // Accrual du funding sur chaque unite ouverte
+  if (rec.f_funding !== null && isFinite(rec.f_funding)) {
+    for (const o of opens) {
+      const dir = o.side === "SHORT_F_LONG_S" ? 1 : -1;
+      o.funding_usd = (o.funding_usd || 0) + rec.f_funding * o.size_usd * (CONFIG.poll_interval_sec / 3600) * dir;
+    }
   }
 
-  if (!open) {
-    const CR = P.carry || {};
-    if (CR.enabled && rec.funding_ema !== undefined && rec.funding_ema !== null
-        && (rec.funding_obs || 0) >= (CR.min_obs || 60)
-        && state.positions.length < P.max_open_positions
-        && Math.abs(rec.spread_pct) <= (CR.max_spread_entry_pct || 0.15)) {
-      const aprPct = rec.funding_ema * 24 * 365 * 100;
-      if (Math.abs(aprPct) >= (CR.min_apr_pct || 15)) {
-        const cpos = {
-          id: Date.now().toString(36) + "-" + symbol,
-          symbol, kind: "CARRY",
-          side: aprPct > 0 ? "SHORT_F_LONG_S" : "LONG_F_SHORT_S",
-          t_open: now.toISOString(),
-          s_open: rec.s_price, f_open: rec.f_price,
-          spread_open_pct: rec.spread_pct,
-          apr_open_pct: Math.round(aprPct * 100) / 100,
-          size_usd: P.size_usd_per_leg, funding_usd: 0,
-          s_depth_usd: null, f_depth_usd: null, max_size_usd: null
-        };
-        state.positions.push(cpos);
-        attachDepth(cpos).catch(() => {});
-        return;
-      }
-    }
-    if (Math.abs(rec.spread_net_pct) >= P.entry_net_pct && state.positions.length < P.max_open_positions) {
+  // Entrees : jusqu'a 2 unites par ticker, espacees de unit_spacing_pct
+  const maxU = P.max_units_per_ticker || 2;
+  const spacing = P.unit_spacing_pct || 0.30;
+  if (opens.length < maxU && state.positions.length < P.max_open_positions) {
+    const needed = P.entry_net_pct + spacing * opens.length;
+    const sameDir = opens.length === 0 || Math.sign(rec.spread_pct) === Math.sign(opens[0].spread_open_pct);
+    if (sameDir && Math.abs(rec.spread_net_pct) >= needed) {
       const pos = {
-        id: Date.now().toString(36) + "-" + symbol,
-        symbol, kind: "ARB",
+        id: Date.now().toString(36) + "-" + symbol + "-" + (opens.length + 1),
+        symbol, kind: "ARB", unit: opens.length + 1,
         side: rec.spread_pct > 0 ? "SHORT_F_LONG_S" : "LONG_F_SHORT_S",
         t_open: now.toISOString(),
         s_open: rec.s_price, f_open: rec.f_price,
@@ -436,58 +438,40 @@ function paperEngine(symbol, rec, now) {
       state.positions.push(pos);
       attachDepth(pos).catch(() => {});
     }
-    return;
   }
 
-  const ageH = (now - new Date(open.t_open)) / 3600000;
-  const sameSign = Math.sign(rec.spread_pct) === Math.sign(open.spread_open_pct);
-  let shouldClose = false, closeReason = "";
-  if (open.kind === "CARRY") {
-    const CR = P.carry || {};
-    const emaApr = (rec.funding_ema !== undefined && rec.funding_ema !== null ? rec.funding_ema : (rec.f_funding || 0)) * 24 * 365 * 100;
-    const receiveApr = open.side === "SHORT_F_LONG_S" ? emaApr : -emaApr;
-    if (receiveApr < (CR.exit_apr_pct || 3)) {
-      if (!open.below_since) open.below_since = now.toISOString();
-    } else {
-      open.below_since = null;
-    }
-    const belowH = open.below_since ? (now - new Date(open.below_since)) / 3600000 : 0;
-    if (receiveApr < (CR.hard_exit_apr_pct !== undefined ? CR.hard_exit_apr_pct : -10) && belowH >= 0.25) {
-      shouldClose = true; closeReason = "CARRY_PAIE";
-    } else if (ageH >= (CR.min_hold_hours || 6) && belowH >= (CR.exit_patience_hours || 2)) {
-      shouldClose = true; closeReason = "CARRY_APR_BAS";
-    } else if (ageH >= (CR.max_hold_hours || 336)) {
-      shouldClose = true; closeReason = "TIME_STOP";
-    }
-  } else {
-    if (Math.abs(rec.spread_pct) <= P.exit_gross_pct) { shouldClose = true; closeReason = "CONVERGENCE"; }
+  // Sorties : par unite - convergence a max(exit_gross, 30% du spread d'entree), cross-zero, time stop
+  for (const open of opens) {
+    const ageH = (now - new Date(open.t_open)) / 3600000;
+    const sameSign = Math.sign(rec.spread_pct) === Math.sign(open.spread_open_pct);
+    const exitLevel = Math.max(P.exit_gross_pct, Math.abs(open.spread_open_pct) * (1 - (P.capture_frac || 0.7)));
+    let shouldClose = false, closeReason = "";
+    if (Math.abs(rec.spread_pct) <= exitLevel) { shouldClose = true; closeReason = "CONVERGENCE"; }
     else if (ageH >= P.max_hold_hours) { shouldClose = true; closeReason = "TIME_STOP"; }
     else if (!sameSign) { shouldClose = true; closeReason = "CROSS_ZERO"; }
-  }
 
-  if (shouldClose) {
-    const captured = sameSign
-      ? Math.abs(open.spread_open_pct) - Math.abs(rec.spread_pct)
-      : Math.abs(open.spread_open_pct) + Math.abs(rec.spread_pct);
-    const feesPct = open.kind === "CARRY" ? ((P.carry || {}).fees_roundtrip_pct || 0.15) : roundTripFeesPct;
-    const pnl = (captured - feesPct) / 100 * open.size_usd + (open.funding_usd || 0);
-    const closed = Object.assign({}, open, {
-      t_close: now.toISOString(),
-      s_close: rec.s_price, f_close: rec.f_price,
-      spread_close_pct: rec.spread_pct,
-      funding_usd: Math.round((open.funding_usd || 0) * 100) / 100,
-      pnl_usd: Math.round(pnl * 100) / 100,
-      reason: closeReason
-    });
-    state.history.unshift(closed);
-    state.history = state.history.slice(0, 200);
-    state.positions = state.positions.filter(p => p.id !== open.id);
-    state.counters.trades++;
-    if (pnl > 0) state.counters.wins++;
-    state.counters.pnl_total_usd = Math.round((state.counters.pnl_total_usd + pnl) * 100) / 100;
+    if (shouldClose) {
+      const captured = sameSign
+        ? Math.abs(open.spread_open_pct) - Math.abs(rec.spread_pct)
+        : Math.abs(open.spread_open_pct) + Math.abs(rec.spread_pct);
+      const pnl = (captured - roundTripFeesPct) / 100 * open.size_usd + (open.funding_usd || 0);
+      const closed = Object.assign({}, open, {
+        t_close: now.toISOString(),
+        s_close: rec.s_price, f_close: rec.f_price,
+        spread_close_pct: rec.spread_pct,
+        funding_usd: Math.round((open.funding_usd || 0) * 100) / 100,
+        pnl_usd: Math.round(pnl * 100) / 100,
+        reason: closeReason
+      });
+      state.history.unshift(closed);
+      state.history = state.history.slice(0, 200);
+      state.positions = state.positions.filter(p => p.id !== open.id);
+      state.counters.trades++;
+      if (pnl > 0) state.counters.wins++;
+      state.counters.pnl_total_usd = Math.round((state.counters.pnl_total_usd + pnl) * 100) / 100;
+    }
   }
 }
-
 
 // ---------- Profondeur exécutable au moment du trade ----------
 const DEPTH_BAND_PCT = 0.10; // on cumule les niveaux jusqu'a 0.10% d'impact
