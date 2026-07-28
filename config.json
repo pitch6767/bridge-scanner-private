@@ -23,7 +23,12 @@
     },
     "capture_frac": 0.7,
     "max_units_per_ticker": 2,
-    "unit_spacing_pct": 0.3
+    "unit_spacing_pct": 0.3,
+    "size_mode": "depth",
+    "max_size_usd_per_leg": 10000,
+    "depth_fraction": 0.5,
+    "fallback_size_usd": 2000,
+    "max_gross_usd": 100000
   },
   "survival_check_sec": 60,
   "hl_dex": "xyz",

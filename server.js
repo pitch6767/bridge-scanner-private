@@ -1,7 +1,7 @@
 // bridge-scanner v1 — Livre 4 : triangle U/S/F, phase scanner S-F (paper)
 // Node >= 18, zéro dépendance. Port 8085.
 "use strict";
-const VERSION = "1.19";
+const VERSION = "1.20";
 
 const http = require("http");
 const fs = require("fs");
@@ -388,7 +388,7 @@ async function poll() {
         rec.s_status = "DATA_SUSPECT"; // prix spot probablement perime/illiquide : on observe, on ne trade pas
       } else {
         trackDislocation(t.symbol, rec.spread_net_pct, now);
-        paperEngine(t.symbol, rec, now);
+        await paperEngine(t.symbol, rec, now);
       }
     } else {
       rec.spread_pct = null; rec.spread_net_pct = null;
@@ -406,7 +406,7 @@ async function poll() {
 const P = CONFIG.paper;
 const roundTripFeesPct = 2 * (CONFIG.assumed_fees_pct.spot_taker + CONFIG.assumed_fees_pct.hl_taker) + CONFIG.assumed_fees_pct.slippage_buffer;
 
-function paperEngine(symbol, rec, now) {
+async function paperEngine(symbol, rec, now) {
   if (rec.spread_pct === null) return;
   const opens = state.positions.filter(p => p.symbol === symbol);
 
@@ -432,11 +432,23 @@ function paperEngine(symbol, rec, now) {
         t_open: now.toISOString(),
         s_open: rec.s_price, f_open: rec.f_price,
         spread_open_pct: rec.spread_pct,
-        size_usd: P.size_usd_per_leg, funding_usd: 0,
+        size_usd: P.size_usd_per_leg || 1000, funding_usd: 0,
         s_depth_usd: null, f_depth_usd: null, max_size_usd: null
       };
-      state.positions.push(pos);
-      attachDepth(pos).catch(() => {});
+      // Dimensionnement realiste : 50% de la profondeur mesuree, plafonne, avant enregistrement
+      try { await attachDepth(pos); } catch (e) {}
+      if ((P.size_mode || "fixed") === "depth") {
+        const maxSz = P.max_size_usd_per_leg || 10000;
+        const frac = P.depth_fraction || 0.5;
+        pos.size_usd = pos.max_size_usd
+          ? Math.max(500, Math.min(maxSz, Math.round(pos.max_size_usd * frac)))
+          : (P.fallback_size_usd || 2000);
+      }
+      // Garde-fou d'exposition globale
+      const gross = state.positions.reduce((a, p) => a + p.size_usd, 0);
+      if (gross + pos.size_usd <= (P.max_gross_usd || 100000)) {
+        state.positions.push(pos);
+      }
     }
   }
 
@@ -601,7 +613,7 @@ h1{font-size:20px;margin:0 0 4px}
   <div class="cbox"><div class="v" id="c_pnl">$0</div><div class="l">P&L paper</div></div>
 </div>
 <div class="grid" id="grid"></div>
-<h2 style="font-size:15px;margin:20px 0 8px">Positions ouvertes <small class="lbl">(paper · entrée ≥ ${CONFIG.paper.entry_net_pct}% net · sortie ≤ ${CONFIG.paper.exit_gross_pct}% brut · $${CONFIG.paper.size_usd_per_leg}/jambe)</small></h2>
+<h2 style="font-size:15px;margin:20px 0 8px">Positions ouvertes <small class="lbl">(paper · entrée ≥ ${CONFIG.paper.entry_net_pct}% net · sortie ≤ ${CONFIG.paper.exit_gross_pct}% brut · taille auto: 50% profondeur, max $${CONFIG.paper.max_size_usd_per_leg}/jambe)</small></h2>
 <div id="pos" class="grid"></div>
 <h2 style="font-size:15px;margin:20px 0 8px">Historique</h2>
 <table style="width:100%;border-collapse:collapse;font-size:12px" id="hist"></table>
