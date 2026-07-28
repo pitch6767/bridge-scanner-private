@@ -1,7 +1,7 @@
 // bridge-scanner v1 — Livre 4 : triangle U/S/F, phase scanner S-F (paper)
 // Node >= 18, zéro dépendance. Port 8085.
 "use strict";
-const VERSION = "1.20";
+const VERSION = "1.21";
 
 const http = require("http");
 const fs = require("fs");
@@ -23,7 +23,8 @@ let state = {
   weekend_log: [],      // { weekend_of, symbol, spread_fri_22h, spread_mon_open, converged }
   errors: [],
   discover_log: [],
-  sol_mints: {}
+  sol_mints: {},
+  treasury: { bybit_usd: 2500, hl_usd: 2500, transfer_hint: null }
 };
 
 try {
@@ -33,6 +34,7 @@ try {
     state.positions = (prev.positions || []).filter(p => (p.kind || "ARB") !== "CARRY");
     state.history = (prev.history || []).filter(h => (h.kind || "ARB") !== "CARRY");
     state.sol_mints = prev.sol_mints || {};
+    state.treasury = prev.treasury || { bybit_usd: 2500, hl_usd: 2500, transfer_hint: null };
     state.counters = Object.assign(state.counters, prev.counters || {});
     // Purge CARRY : recalcul des compteurs de trades depuis l'historique restant
     state.counters.trades = state.history.length;
@@ -437,16 +439,17 @@ async function paperEngine(symbol, rec, now) {
       };
       // Dimensionnement realiste : 50% de la profondeur mesuree, plafonne, avant enregistrement
       try { await attachDepth(pos); } catch (e) {}
+      const usedSpot = state.positions.reduce((a, p) => a + p.size_usd, 0);
+      const availSpot = Math.max(0, (state.treasury.bybit_usd || 0) - usedSpot); // le cash spot est la contrainte dure
       if ((P.size_mode || "fixed") === "depth") {
-        const maxSz = P.max_size_usd_per_leg || 10000;
+        const maxSz = P.max_size_usd_per_leg || 2500;
         const frac = P.depth_fraction || 0.5;
-        pos.size_usd = pos.max_size_usd
-          ? Math.max(500, Math.min(maxSz, Math.round(pos.max_size_usd * frac)))
-          : (P.fallback_size_usd || 2000);
+        const depthSz = pos.max_size_usd ? Math.round(pos.max_size_usd * frac) : (P.fallback_size_usd || 2000);
+        pos.size_usd = Math.min(maxSz, depthSz, Math.floor(availSpot));
+      } else {
+        pos.size_usd = Math.min(pos.size_usd, Math.floor(availSpot));
       }
-      // Garde-fou d'exposition globale
-      const gross = state.positions.reduce((a, p) => a + p.size_usd, 0);
-      if (gross + pos.size_usd <= (P.max_gross_usd || 100000)) {
+      if (pos.size_usd >= 500) {
         state.positions.push(pos);
       }
     }
@@ -475,6 +478,28 @@ async function paperEngine(symbol, rec, now) {
         pnl_usd: Math.round(pnl * 100) / 100,
         reason: closeReason
       });
+      // Repartition du P&L par venue (prototype du treasurer)
+      if (open.s_open && open.f_open && rec.s_price && rec.f_price) {
+        const longSpot = open.side === "SHORT_F_LONG_S";
+        const spotFees = open.size_usd * 2 * CONFIG.assumed_fees_pct.spot_taker / 100;
+        const perpFees = open.size_usd * 2 * CONFIG.assumed_fees_pct.hl_taker / 100;
+        const spotPnl = (longSpot ? 1 : -1) * (rec.s_price - open.s_open) / open.s_open * open.size_usd - spotFees;
+        const perpPnl = (longSpot ? 1 : -1) * (open.f_open - rec.f_price) / open.f_open * open.size_usd - perpFees + (open.funding_usd || 0);
+        state.treasury.bybit_usd = Math.round((state.treasury.bybit_usd + spotPnl) * 100) / 100;
+        state.treasury.hl_usd = Math.round((state.treasury.hl_usd + perpPnl) * 100) / 100;
+        closed.spot_pnl_usd = Math.round(spotPnl * 100) / 100;
+        closed.perp_pnl_usd = Math.round(perpPnl * 100) / 100;
+        const tot = state.treasury.bybit_usd + state.treasury.hl_usd;
+        const ratio = tot > 0 ? Math.abs(state.treasury.bybit_usd - state.treasury.hl_usd) / tot : 0;
+        if (ratio > ((P.rebalance_alert_ratio || 0.30))) {
+          const from = state.treasury.bybit_usd > state.treasury.hl_usd ? "Bybit" : "Hyperliquid";
+          const to = from === "Bybit" ? "Hyperliquid" : "Bybit";
+          const amt = Math.round(Math.abs(state.treasury.bybit_usd - state.treasury.hl_usd) / 2);
+          state.treasury.transfer_hint = "Transfert conseill\u00e9 : $" + amt + " de " + from + " vers " + to;
+        } else {
+          state.treasury.transfer_hint = null;
+        }
+      }
       state.history.unshift(closed);
       state.history = state.history.slice(0, 200);
       state.positions = state.positions.filter(p => p.id !== open.id);
@@ -604,6 +629,7 @@ h1{font-size:20px;margin:0 0 4px}
 <button id="upd" style="float:right;background:#21262d;color:#58a6ff;border:1px solid #30363d;border-radius:8px;padding:6px 14px;font-size:12px;cursor:pointer">Mettre à jour</button></h1>
 <div class="sub" id="diag" style="color:#d29922;font-size:12px;margin-bottom:6px"></div>
 <div class="sub">Livre 4 · Triangle U/S/F · Phase 1 paper · S = xStocks Bybit · F = perp Hyperliquid · seuil ${CONFIG.dislocation_threshold_pct}% net</div>
+<div class="counters" id="treasury" style="margin-bottom:0"></div>
 <div class="counters">
   <div class="cbox"><div class="v" id="c_det">0</div><div class="l">dislocations</div></div>
   <div class="cbox"><div class="v" id="c_sur">0</div><div class="l">survie 60s</div></div>
@@ -625,6 +651,15 @@ async function refresh(){
     document.getElementById('mkt').textContent = s.market_open ? 'NYSE OUVERT (triangle complet)' : 'NYSE FERMÉ (mode S-F, fenêtre edge)';
     document.getElementById('mkt').className = 'badge ' + (s.market_open ? 'open' : 'closed');
     document.getElementById('diag').textContent = (s.discover_log || []).join('  \u00b7  ');
+    if (s.treasury) {
+      var tr = s.treasury;
+      var tot = (tr.bybit_usd + tr.hl_usd);
+      document.getElementById('treasury').innerHTML =
+        '<div class="cbox"><div class="v">$' + tr.bybit_usd.toFixed(0) + '</div><div class="l">Bybit (spot)</div></div>'
+        + '<div class="cbox"><div class="v">$' + tr.hl_usd.toFixed(0) + '</div><div class="l">Hyperliquid (perp)</div></div>'
+        + '<div class="cbox"><div class="v ' + (tot >= 5000 ? 'pos' : 'neg') + '">$' + tot.toFixed(0) + '</div><div class="l">capital total (d\u00e9part $5000)</div></div>'
+        + (tr.transfer_hint ? '<div class="cbox"><div class="v warn" style="font-size:13px">' + tr.transfer_hint + '</div><div class="l">tr\u00e9sorerie</div></div>' : '');
+    }
     document.getElementById('tkcount').textContent = Object.keys(s.tickers).length;
     document.getElementById('c_det').textContent = s.counters.detected;
     document.getElementById('c_sur').textContent = s.counters.survived_60s;

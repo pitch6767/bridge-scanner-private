@@ -25,10 +25,13 @@
     "max_units_per_ticker": 2,
     "unit_spacing_pct": 0.3,
     "size_mode": "depth",
-    "max_size_usd_per_leg": 10000,
+    "max_size_usd_per_leg": 2500,
     "depth_fraction": 0.5,
     "fallback_size_usd": 2000,
-    "max_gross_usd": 100000
+    "max_gross_usd": 100000,
+    "capital_per_side_usd": 2500,
+    "compounding": true,
+    "rebalance_alert_ratio": 0.3
   },
   "survival_check_sec": 60,
   "hl_dex": "xyz",
