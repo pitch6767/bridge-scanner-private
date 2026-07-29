@@ -4,7 +4,7 @@
   "poll_interval_sec": 10,
   "dislocation_threshold_pct": 0.5,
   "paper": {
-    "entry_net_pct": 0.25,
+    "entry_net_pct": 0.4,
     "exit_gross_pct": 0.08,
     "size_usd_per_leg": 1000,
     "max_open_positions": 36,
@@ -21,7 +21,7 @@
       "max_hold_hours": 336,
       "min_obs": 60
     },
-    "capture_frac": 0.7,
+    "capture_frac": 0.75,
     "max_units_per_ticker": 2,
     "unit_spacing_pct": 0.3,
     "size_mode": "depth",

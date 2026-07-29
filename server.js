@@ -1,7 +1,7 @@
 // bridge-scanner v1 — Livre 4 : triangle U/S/F, phase scanner S-F (paper)
 // Node >= 18, zéro dépendance. Port 8085.
 "use strict";
-const VERSION = "1.21";
+const VERSION = "1.22";
 
 const http = require("http");
 const fs = require("fs");
@@ -24,7 +24,8 @@ let state = {
   errors: [],
   discover_log: [],
   sol_mints: {},
-  treasury: { bybit_usd: 2500, hl_usd: 2500, transfer_hint: null }
+  treasury: { bybit_usd: 2500, hl_usd: 2500, transfer_hint: null },
+  daily: { date: new Date().toISOString().slice(0, 10), pnl_usd: 0, trades: 0 }
 };
 
 try {
@@ -35,6 +36,7 @@ try {
     state.history = (prev.history || []).filter(h => (h.kind || "ARB") !== "CARRY");
     state.sol_mints = prev.sol_mints || {};
     state.treasury = prev.treasury || { bybit_usd: 2500, hl_usd: 2500, transfer_hint: null };
+    state.daily = prev.daily || state.daily;
     state.counters = Object.assign(state.counters, prev.counters || {});
     // Purge CARRY : recalcul des compteurs de trades depuis l'historique restant
     state.counters.trades = state.history.length;
@@ -503,6 +505,10 @@ async function paperEngine(symbol, rec, now) {
       state.history.unshift(closed);
       state.history = state.history.slice(0, 200);
       state.positions = state.positions.filter(p => p.id !== open.id);
+      const today = now.toISOString().slice(0, 10);
+      if (state.daily.date !== today) state.daily = { date: today, pnl_usd: 0, trades: 0 };
+      state.daily.pnl_usd = Math.round((state.daily.pnl_usd + pnl) * 100) / 100;
+      state.daily.trades++;
       state.counters.trades++;
       if (pnl > 0) state.counters.wins++;
       state.counters.pnl_total_usd = Math.round((state.counters.pnl_total_usd + pnl) * 100) / 100;
@@ -658,6 +664,7 @@ async function refresh(){
         '<div class="cbox"><div class="v">$' + tr.bybit_usd.toFixed(0) + '</div><div class="l">Bybit (spot)</div></div>'
         + '<div class="cbox"><div class="v">$' + tr.hl_usd.toFixed(0) + '</div><div class="l">Hyperliquid (perp)</div></div>'
         + '<div class="cbox"><div class="v ' + (tot >= 5000 ? 'pos' : 'neg') + '">$' + tot.toFixed(0) + '</div><div class="l">capital total (d\u00e9part $5000)</div></div>'
+        + (s.daily ? '<div class="cbox"><div class="v ' + (s.daily.pnl_usd >= 0 ? 'pos' : 'neg') + '">$' + s.daily.pnl_usd.toFixed(2) + ' (' + (100 * s.daily.pnl_usd / tot).toFixed(2) + '%)</div><div class="l">P&L du jour \u00b7 ' + s.daily.trades + ' trades</div></div>' : '')
         + (tr.transfer_hint ? '<div class="cbox"><div class="v warn" style="font-size:13px">' + tr.transfer_hint + '</div><div class="l">tr\u00e9sorerie</div></div>' : '');
     }
     document.getElementById('tkcount').textContent = Object.keys(s.tickers).length;
