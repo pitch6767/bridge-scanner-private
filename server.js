@@ -1,7 +1,7 @@
 // bridge-scanner v1 — Livre 4 : triangle U/S/F, phase scanner S-F (paper)
 // Node >= 18, zéro dépendance. Port 8085.
 "use strict";
-const VERSION = "1.22";
+const VERSION = "1.23";
 
 const http = require("http");
 const fs = require("fs");
@@ -25,7 +25,8 @@ let state = {
   discover_log: [],
   sol_mints: {},
   treasury: { bybit_usd: 2500, hl_usd: 2500, transfer_hint: null },
-  daily: { date: new Date().toISOString().slice(0, 10), pnl_usd: 0, trades: 0 }
+  daily: { date: new Date().toISOString().slice(0, 10), pnl_usd: 0, trades: 0 },
+  earnings: {}, earnings_updated: null
 };
 
 try {
@@ -37,6 +38,7 @@ try {
     state.sol_mints = prev.sol_mints || {};
     state.treasury = prev.treasury || { bybit_usd: 2500, hl_usd: 2500, transfer_hint: null };
     state.daily = prev.daily || state.daily;
+    state.earnings = prev.earnings || {};
     state.counters = Object.assign(state.counters, prev.counters || {});
     // Purge CARRY : recalcul des compteurs de trades depuis l'historique restant
     state.counters.trades = state.history.length;
@@ -286,7 +288,9 @@ async function fetchSpot() {
     // Le perp mene la decouverte de prix : s'il a bouge >0.15% depuis le dernier fetch Solana, on force
     if (!jupCache.refF) jupCache.refF = {};
     let force = false;
+    const nowD = new Date();
     for (const t of solT) {
+      if (inEarningsTurbo(t.symbol, nowD)) { force = true; break; }
       const cur = state.tickers[t.symbol] && state.tickers[t.symbol].f_price;
       const ref = jupCache.refF[t.symbol];
       if (cur && ref && Math.abs(cur - ref) / ref * 100 > 0.15) { force = true; break; }
@@ -355,6 +359,52 @@ async function hlDexCoinsCtx(dex) {
     };
   }
   return out;
+}
+
+
+// ---------- Calendrier des resultats (earnings) ----------
+async function fetchEarningsCalendar() {
+  try {
+    const out = {};
+    const inUniverse = new Set(UNIVERSE.map(t => t.symbol));
+    for (let d = 0; d < 8; d++) {
+      const day = new Date(Date.now() + d * 86400000).toISOString().slice(0, 10);
+      try {
+        const r = await fetch("https://api.nasdaq.com/api/calendar/earnings?date=" + day, {
+          headers: { "User-Agent": "Mozilla/5.0", "Accept": "application/json" },
+          signal: AbortSignal.timeout(10000)
+        });
+        if (!r.ok) continue;
+        const j = await r.json();
+        const rows = (j && j.data && j.data.rows) || [];
+        for (const row of rows) {
+          const sym = String(row.symbol || "").toUpperCase();
+          if (!inUniverse.has(sym)) continue;
+          const t = String(row.time || "");
+          out[sym] = { date: day, when: t.includes("after") ? "AMC" : (t.includes("pre") ? "BMO" : "?") };
+        }
+      } catch (e) { /* jour illisible */ }
+      await sleep(400);
+    }
+    state.earnings = out;
+    state.earnings_updated = new Date().toISOString();
+    console.log("earnings: " + Object.keys(out).map(s => s + " " + out[s].date + " " + out[s].when).join(", "));
+  } catch (e) { pushErr("earnings: " + e.message); }
+}
+
+// Ticker en fenetre chaude : resultats AMC aujourd'hui, autour de 16h00 ET (cloture NYSE)
+function inEarningsTurbo(symbol, now) {
+  const e = state.earnings[symbol];
+  if (!e) return false;
+  const today = now.toISOString().slice(0, 10);
+  if (e.date !== today) return false;
+  const fmt = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "numeric", hour12: false });
+  const p = Object.fromEntries(fmt.formatToParts(now).map(x => [x.type, x.value]));
+  const mins = parseInt(p.hour, 10) * 60 + parseInt(p.minute, 10);
+  const EC = CONFIG.earnings || {};
+  if (e.when === "AMC") return mins >= (16 * 60 - (EC.turbo_window_min_before || 20)) && mins <= (16 * 60 + (EC.turbo_window_min_after || 120));
+  if (e.when === "BMO") return mins >= (9 * 60 - (EC.turbo_window_min_after || 120)) && mins <= (9 * 60 + 45);
+  return false;
 }
 
 // ---------- Boucle scanner ----------
@@ -656,7 +706,9 @@ async function refresh(){
     const r = await fetch('/api/state'); const s = await r.json();
     document.getElementById('mkt').textContent = s.market_open ? 'NYSE OUVERT (triangle complet)' : 'NYSE FERMÉ (mode S-F, fenêtre edge)';
     document.getElementById('mkt').className = 'badge ' + (s.market_open ? 'open' : 'closed');
-    document.getElementById('diag').textContent = (s.discover_log || []).join('  \u00b7  ');
+    var eList = Object.keys(s.earnings || {}).sort(function(a,b){ return s.earnings[a].date < s.earnings[b].date ? -1 : 1; })
+      .map(function(k){ return k + ' ' + s.earnings[k].date.slice(5) + ' ' + s.earnings[k].when; });
+    document.getElementById('diag').textContent = (eList.length ? '\ud83d\udcca Annonces: ' + eList.join(', ') + '   \u00b7   ' : '') + (s.discover_log || []).join('  \u00b7  ');
     if (s.treasury) {
       var tr = s.treasury;
       var tot = (tr.bybit_usd + tr.hl_usd);
@@ -676,7 +728,9 @@ async function refresh(){
       const spread = t.spread_pct, net = t.spread_net_pct;
       const cls = net === null ? 'lbl' : (Math.abs(net) >= ${CONFIG.dislocation_threshold_pct} ? 'warn' : (net >= 0 ? 'pos' : 'neg'));
       const div = document.createElement('div'); div.className = 'card';
-      div.innerHTML = '<div class="sym">' + sym + '</div>'
+      var ee = (s.earnings || {})[sym];
+      var eBadge = ee ? ' <small class="warn">\ud83d\udcca ' + (ee.date === new Date().toISOString().slice(0,10) ? 'R\u00c9SULTATS ' + (ee.when === 'AMC' ? 'CE SOIR' : 'AVANT OUVERTURE') : ee.date.slice(5) + ' ' + ee.when) + '</small>' : '';
+      div.innerHTML = '<div class="sym">' + sym + eBadge + '</div>'
         + '<div class="row"><span class="lbl">xStock (S)</span><span>' + fmt(t.s_price) + ' <small class="lbl">' + t.s_status + '</small></span></div>'
         + '<div class="row"><span class="lbl">Perp HL (F)</span><span>' + fmt(t.f_price) + ' <small class="lbl">' + t.f_status + '</small></span></div>'
         + '<div class="row"><span class="lbl">Funding</span><span>' + (t.f_funding === null ? '–' : (100*t.f_funding).toFixed(4) + '%') + '</span></div>'
@@ -830,7 +884,8 @@ const server = http.createServer((req, res) => {
 
 server.listen(CONFIG.port, "0.0.0.0", () => {
   console.log("bridge-scanner · port " + CONFIG.port);
-  discoverUniverse().then(() => poll());
+  discoverUniverse().then(() => { fetchEarningsCalendar(); poll(); });
   setInterval(discoverUniverse, 6 * 3600 * 1000); // re-scan de l'univers toutes les 6h
+  setInterval(fetchEarningsCalendar, 12 * 3600 * 1000);
   setInterval(poll, CONFIG.poll_interval_sec * 1000);
 });

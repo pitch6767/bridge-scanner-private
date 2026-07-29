@@ -69,5 +69,11 @@
       "hl_coin": "xyz:COIN"
     }
   ],
-  "note": "Jambe S = Bybit spot xStocks (API publique v5). AAPL = APPLX sur Bybit. Jambe F = perps equity HIP-3 sur le dex builder xyz d'Hyperliquid. SPY/QQQ retires (absents du dex xyz)."
+  "note": "Jambe S = Bybit spot xStocks (API publique v5). AAPL = APPLX sur Bybit. Jambe F = perps equity HIP-3 sur le dex builder xyz d'Hyperliquid. SPY/QQQ retires (absents du dex xyz).",
+  "earnings": {
+    "enabled": true,
+    "turbo_window_min_before": 20,
+    "turbo_window_min_after": 120,
+    "turbo_poll_sec": 5
+  }
 }
