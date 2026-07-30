@@ -73,7 +73,8 @@
   "earnings": {
     "enabled": true,
     "turbo_window_min_before": 20,
-    "turbo_window_min_after": 120,
-    "turbo_poll_sec": 5
+    "turbo_window_min_after": 240,
+    "turbo_poll_sec": 5,
+    "suspect_threshold_turbo_pct": 12.0
   }
 }

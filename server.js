@@ -1,7 +1,7 @@
 // bridge-scanner v1 — Livre 4 : triangle U/S/F, phase scanner S-F (paper)
 // Node >= 18, zéro dépendance. Port 8085.
 "use strict";
-const VERSION = "1.23";
+const VERSION = "1.24";
 
 const http = require("http");
 const fs = require("fs");
@@ -438,7 +438,10 @@ async function poll() {
       const spread = ((f.mark - s.mid) / s.mid) * 100; // F riche > 0
       rec.spread_pct = round4(spread);
       rec.spread_net_pct = round4(Math.abs(spread) - totalFeesPct) * Math.sign(spread);
-      if (Math.abs(spread) > 3.0) {
+      const suspectTh = inEarningsTurbo(t.symbol, now)
+        ? ((CONFIG.earnings || {}).suspect_threshold_turbo_pct || 12.0)
+        : 3.0;
+      if (Math.abs(spread) > suspectTh) {
         rec.s_status = "DATA_SUSPECT"; // prix spot probablement perime/illiquide : on observe, on ne trade pas
       } else {
         trackDislocation(t.symbol, rec.spread_net_pct, now);
