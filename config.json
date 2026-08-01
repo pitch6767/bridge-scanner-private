@@ -8,7 +8,7 @@
     "exit_gross_pct": 0.08,
     "size_usd_per_leg": 1000,
     "max_open_positions": 36,
-    "max_hold_hours": 72,
+    "max_hold_hours": 36,
     "carry": {
       "enabled": false,
       "min_apr_pct": 15,
@@ -31,7 +31,8 @@
     "max_gross_usd": 100000,
     "capital_per_side_usd": 2500,
     "compounding": true,
-    "rebalance_alert_ratio": 0.3
+    "rebalance_alert_ratio": 0.3,
+    "stop_widen_factor": 2.0
   },
   "survival_check_sec": 60,
   "hl_dex": "xyz",

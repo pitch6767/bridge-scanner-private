@@ -1,7 +1,7 @@
 // bridge-scanner v1 — Livre 4 : triangle U/S/F, phase scanner S-F (paper)
 // Node >= 18, zéro dépendance. Port 8085.
 "use strict";
-const VERSION = "1.24";
+const VERSION = "1.25";
 
 const http = require("http");
 const fs = require("fs");
@@ -504,6 +504,7 @@ async function paperEngine(symbol, rec, now) {
       } else {
         pos.size_usd = Math.min(pos.size_usd, Math.floor(availSpot));
       }
+      pos.size_usd = Math.min(pos.size_usd, 2500); // VERROU ABSOLU - regle utilisateur, prioritaire sur toute config
       if (pos.size_usd >= 500) {
         state.positions.push(pos);
       }
@@ -517,6 +518,7 @@ async function paperEngine(symbol, rec, now) {
     const exitLevel = Math.max(P.exit_gross_pct, Math.abs(open.spread_open_pct) * (1 - (P.capture_frac || 0.7)));
     let shouldClose = false, closeReason = "";
     if (Math.abs(rec.spread_pct) <= exitLevel) { shouldClose = true; closeReason = "CONVERGENCE"; }
+    else if (sameSign && Math.abs(rec.spread_pct) >= Math.abs(open.spread_open_pct) * (P.stop_widen_factor || 2.0)) { shouldClose = true; closeReason = "STOP_LOSS"; }
     else if (ageH >= P.max_hold_hours) { shouldClose = true; closeReason = "TIME_STOP"; }
     else if (!sameSign) { shouldClose = true; closeReason = "CROSS_ZERO"; }
 
