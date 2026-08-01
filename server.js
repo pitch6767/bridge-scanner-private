@@ -1,7 +1,7 @@
 // bridge-scanner v1 — Livre 4 : triangle U/S/F, phase scanner S-F (paper)
 // Node >= 18, zéro dépendance. Port 8085.
 "use strict";
-const VERSION = "1.26";
+const VERSION = "1.27";
 
 const http = require("http");
 const fs = require("fs");
@@ -24,6 +24,7 @@ let state = {
   errors: [],
   discover_log: [],
   sol_mints: {},
+  ff_pairs: [],
   treasury: { bybit_usd: 2500, hl_usd: 2500, transfer_hint: null },
   daily: { date: new Date().toISOString().slice(0, 10), pnl_usd: 0, trades: 0 },
   earnings: {}, earnings_updated: null
@@ -152,8 +153,8 @@ async function discoverUniverse() {
         const coins = await hlDexCoins(dex);
         dlog.push(dex + ": " + Object.keys(coins).length + " marches");
         for (const tk of Object.keys(coins)) {
-          if (!hlByTicker[tk]) hlByTicker[tk] = { dex, name: coins[tk], dexes: [dex] };
-          else hlByTicker[tk].dexes.push(dex);
+          if (!hlByTicker[tk]) hlByTicker[tk] = { dex, name: coins[tk], dexes: [dex], names: { [dex]: coins[tk] } };
+          else { hlByTicker[tk].dexes.push(dex); hlByTicker[tk].names[dex] = coins[tk]; }
         }
       } catch (e) { dlog.push(dex + ": ERREUR " + e.message); }
     }
@@ -192,9 +193,15 @@ async function discoverUniverse() {
         } else { solMissed.push(tk); }
       } catch (e) { solMissed.push(tk + "(err)"); }
     }
-    const multi = Object.keys(hlByTicker).filter(tk => hlByTicker[tk].dexes && hlByTicker[tk].dexes.length > 1)
-      .map(tk => tk + "(" + hlByTicker[tk].dexes.join("+") + ")");
-    dlog.push("multi-dex F-F: [" + multi.slice(0, 15).join(",") + "]");
+    const multiTk = Object.keys(hlByTicker).filter(tk => hlByTicker[tk].dexes && hlByTicker[tk].dexes.length > 1);
+    state.ff_pairs = [];
+    for (const tk of multiTk) {
+      const h = hlByTicker[tk];
+      for (let i = 0; i + 1 < h.dexes.length && i < 1; i++) { // paire principale : les 2 premiers dex
+        state.ff_pairs.push({ symbol: tk, dexA: h.dexes[0], nameA: h.names[h.dexes[0]], dexB: h.dexes[1], nameB: h.names[h.dexes[1]] });
+      }
+    }
+    dlog.push("paires F-F: " + state.ff_pairs.length + " [" + multiTk.slice(0, 15).join(",") + "]");
     dlog.push("ajout Solana: [" + solAdded.join(",") + "]");
     dlog.push("sans jambe S: [" + solMissed.slice(0, 25).join(",") + "]");
     state.discover_log = dlog;
@@ -332,11 +339,13 @@ async function fetchSpot() {
 
 async function fetchHyperliquid() {
   const out = {};
-  const dexes = [...new Set(UNIVERSE.map(t => t.hl_dex || CONFIG.hl_dex))];
+  const ffDexes = (state.ff_pairs || []).flatMap(p => [p.dexA, p.dexB]);
+  const dexes = [...new Set([...UNIVERSE.map(t => t.hl_dex || CONFIG.hl_dex), ...ffDexes])];
   const byDex = {};
   await Promise.all(dexes.map(async (dex) => {
     try { byDex[dex] = await hlDexCoinsCtx(dex); } catch (e) { byDex[dex] = null; pushErr("hl " + dex + ": " + e.message); }
   }));
+  fetchHyperliquid._byDex = byDex; // expose pour le moteur FF
   for (const t of UNIVERSE) {
     const dex = t.hl_dex || CONFIG.hl_dex;
     const data = byDex[dex];
@@ -418,6 +427,92 @@ function inEarningsTurbo(symbol, now) {
   return false;
 }
 
+
+// ---------- Moteur F-F : meme coin sur deux dex HL ----------
+const FF = CONFIG.ff || {};
+async function ffEngine(now) {
+  if (!FF.enabled) return;
+  const byDex = fetchHyperliquid._byDex || {};
+  for (const pair of (state.ff_pairs || [])) {
+    const key = pair.symbol + "@" + pair.dexA + "/" + pair.dexB;
+    const a = (byDex[pair.dexA] || {})[pair.symbol];
+    const b = (byDex[pair.dexB] || {})[pair.symbol];
+    const rec = state.tickers[key] || {};
+    rec.is_ff = true;
+    if (a && b && a.mark > 0 && b.mark > 0) {
+      const spread = (a.mark - b.mark) / b.mark * 100; // A riche > 0
+      rec.a_mark = a.mark; rec.b_mark = b.mark;
+      rec.a_funding = a.funding; rec.b_funding = b.funding;
+      rec.spread_pct = Math.round(spread * 10000) / 10000;
+      rec.spread_net_pct = Math.round((Math.abs(spread) - (FF.fees_roundtrip_pct || 0.24) / 2) * 10000) / 10000 * Math.sign(spread);
+      rec.updated = now.toISOString();
+      state.tickers[key] = rec;
+      if (Math.abs(spread) > 5) continue; // garde donnees
+
+      const open = state.positions.find(p => p.symbol === key);
+      if (!open) {
+        if (Math.abs(rec.spread_net_pct) >= (FF.entry_net_pct || 0.30)
+            && state.positions.filter(p => p.kind === "FF").length < (FF.max_positions || 8)) {
+          const pos = {
+            id: Date.now().toString(36) + "-" + key,
+            symbol: key, kind: "FF", unit: 1,
+            side: spread > 0 ? "SHORT_A_LONG_B" : "LONG_A_SHORT_B",
+            t_open: now.toISOString(),
+            s_open: b.mark, f_open: a.mark,
+            spread_open_pct: rec.spread_pct,
+            size_usd: 1000, funding_usd: 0,
+            s_depth_usd: null, f_depth_usd: null, max_size_usd: null
+          };
+          try {
+            const [dA, dB] = await Promise.all([
+              hlDepthUsd(pair.nameA, spread > 0 ? "sell" : "buy"),
+              hlDepthUsd(pair.nameB, spread > 0 ? "buy" : "sell")
+            ]);
+            pos.f_depth_usd = dA; pos.s_depth_usd = dB;
+            pos.max_size_usd = (dA !== null && dB !== null) ? Math.min(dA, dB) : (dA || dB);
+          } catch (e) {}
+          const depthSz = pos.max_size_usd ? Math.round(pos.max_size_usd * (FF.depth_fraction || 0.4)) : 1000;
+          pos.size_usd = Math.min(FF.max_size_usd_per_leg || 2500, depthSz, 2500);
+          if (pos.size_usd >= 500) state.positions.push(pos);
+        }
+      } else {
+        // accrual funding net (on recoit sur la jambe short si funding>0)
+        const dirA = open.side === "SHORT_A_LONG_B" ? 1 : -1;
+        open.funding_usd = (open.funding_usd || 0) + ((a.funding || 0) * dirA - (b.funding || 0) * dirA) * open.size_usd * (CONFIG.poll_interval_sec / 3600);
+        const ageH = (now - new Date(open.t_open)) / 3600000;
+        const sameSign = Math.sign(rec.spread_pct) === Math.sign(open.spread_open_pct);
+        const exitLevel = Math.abs(open.spread_open_pct) * (1 - (FF.capture_frac || 0.75));
+        let close = false, reason = "";
+        if (Math.abs(rec.spread_pct) <= exitLevel) { close = true; reason = "CONVERGENCE"; }
+        else if (sameSign && Math.abs(rec.spread_pct) >= Math.abs(open.spread_open_pct) * (FF.stop_widen_factor || 2.0)) { close = true; reason = "STOP_LOSS"; }
+        else if (ageH >= (FF.max_hold_hours || 36)) { close = true; reason = "TIME_STOP"; }
+        else if (!sameSign) { close = true; reason = "CROSS_ZERO"; }
+        if (close) {
+          const captured = sameSign
+            ? Math.abs(open.spread_open_pct) - Math.abs(rec.spread_pct)
+            : Math.abs(open.spread_open_pct) + Math.abs(rec.spread_pct);
+          const pnl = (captured - (FF.fees_roundtrip_pct || 0.24)) / 100 * open.size_usd + (open.funding_usd || 0);
+          const closed = Object.assign({}, open, {
+            t_close: now.toISOString(), spread_close_pct: rec.spread_pct,
+            funding_usd: Math.round((open.funding_usd || 0) * 100) / 100,
+            pnl_usd: Math.round(pnl * 100) / 100, reason
+          });
+          state.history.unshift(closed);
+          state.history = state.history.slice(0, 200);
+          state.positions = state.positions.filter(p => p.id !== open.id);
+          state.counters.trades++;
+          if (pnl > 0) state.counters.wins++;
+          state.counters.pnl_total_usd = Math.round((state.counters.pnl_total_usd + pnl) * 100) / 100;
+          const today = now.toISOString().slice(0, 10);
+          if (state.daily.date !== today) state.daily = { date: today, pnl_usd: 0, trades: 0 };
+          state.daily.pnl_usd = Math.round((state.daily.pnl_usd + pnl) * 100) / 100;
+          state.daily.trades++;
+        }
+      }
+    }
+  }
+}
+
 // ---------- Boucle scanner ----------
 const totalFeesPct =
   CONFIG.assumed_fees_pct.spot_taker +
@@ -464,6 +559,7 @@ async function poll() {
     rec.updated = now.toISOString();
     state.tickers[t.symbol] = rec;
   }
+  try { await ffEngine(now); } catch (e) { pushErr("ff: " + e.message); }
   state.last_poll = now.toISOString();
   saveStateAtomic();
 }

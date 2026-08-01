@@ -77,5 +77,16 @@
     "turbo_window_min_after": 240,
     "turbo_poll_sec": 5,
     "suspect_threshold_turbo_pct": 12.0
+  },
+  "ff": {
+    "enabled": true,
+    "entry_net_pct": 0.3,
+    "capture_frac": 0.75,
+    "fees_roundtrip_pct": 0.24,
+    "max_size_usd_per_leg": 2500,
+    "max_positions": 8,
+    "max_hold_hours": 36,
+    "stop_widen_factor": 2.0,
+    "depth_fraction": 0.4
   }
 }
