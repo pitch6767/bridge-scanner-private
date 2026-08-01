@@ -1,7 +1,7 @@
 // bridge-scanner v1 — Livre 4 : triangle U/S/F, phase scanner S-F (paper)
 // Node >= 18, zéro dépendance. Port 8085.
 "use strict";
-const VERSION = "1.25";
+const VERSION = "1.26";
 
 const http = require("http");
 const fs = require("fs");
@@ -40,6 +40,17 @@ try {
     state.daily = prev.daily || state.daily;
     state.earnings = prev.earnings || {};
     state.counters = Object.assign(state.counters, prev.counters || {});
+    // Purge de l'ere biaisee : des trades >2500/jambe invalident toute la serie
+    const biased = state.history.some(h => h.size_usd > 2500) || state.positions.some(p => p.size_usd > 2500);
+    if (biased) {
+      state.positions = [];
+      state.history = [];
+      state.counters.trades = 0; state.counters.wins = 0; state.counters.pnl_total_usd = 0;
+      state.counters.detected = 0; state.counters.survived_60s = 0;
+      state.treasury = { bybit_usd: 2500, hl_usd: 2500, transfer_hint: null };
+      state.daily = { date: new Date().toISOString().slice(0, 10), pnl_usd: 0, trades: 0 };
+      console.log("PURGE: donnees paper biaisees (tailles >2500) - remise a zero complete");
+    }
     // Purge CARRY : recalcul des compteurs de trades depuis l'historique restant
     state.counters.trades = state.history.length;
     state.counters.wins = state.history.filter(h => h.pnl_usd > 0).length;
